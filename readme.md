@@ -1,100 +1,83 @@
-🚀 Fast Image Sorter
+📸 Turbo Photo Sorter (v4.3)
 
-A lightning-fast, keyboard-driven desktop application for culling and organizing massive photo collections. Built with Python and Tkinter, optimized for speed and stability.
+A fast, persistent, and robust desktop application built with Python and Tkinter for quickly culling and sorting large batches of photographs. This tool allows photographers to rapidly categorize images into "Keep," "Discard," and "Maybe" folders, saving your progress automatically.
 
-✨ Key Features
+✨ Features
 
-Zero-Lag Workflow: Background threading ensures the UI never freezes, even when copying large RAW files.
+Non-Destructive Sorting: Uses shutil.move for lightning-fast file operations that preserve 100% of the original image quality and file metadata.
 
-Dark Mode UI: Professional dark theme to reduce eye strain and make photos pop.
+Session Persistence: Automatically creates a turbo_sorter_log.json file in the source folder to track processed files. If you close and restart the app, it resumes exactly where you left off.
 
-Non-Destructive: Copies files to Keep or Discard folders, preserving your original source folder.
+Robust EXIF Display: Integrates the exifread library to provide reliable, detailed metadata (Camera model, Aperture, ISO, etc.) for informed culling decisions.
 
-Instant Undo: Made a mistake? Press Ctrl+Z to instantly reverse the last action and delete the sorted copy.
+Auto-Orientation Fix: Correctly handles all EXIF orientation flags using ImageOps.exif_transpose, ensuring photos are displayed upright regardless of the camera's orientation.
 
-EXIF Data HUD: View camera model, ISO, Aperture, and Date taken at a glance.
+Keyboard Shortcuts: Turbo-charge your workflow with dedicated shortcuts:
 
-Visual Feedback: Anti-flicker rendering and instant visual overlays ("KEPT", "DISCARDED").
+Keep: Right Arrow, K, or Space
 
-🎮 Controls
+Discard: Down Arrow or N
 
-The app is designed to be used with one hand on the keyboard.
+Maybe: M
 
-Action
+Undo: Ctrl+Z
 
-Primary Key
+Dark/Light Theme: Includes a working theme toggle for comfortable use in any environment.
 
-Alternate Key
+⚙️ Requirements
 
-Keep Photo
+To run the application from source code, you need Python 3.x and the following libraries:
 
-Right Arrow ➡
-
-K
-
-Discard Photo
-
-Down Arrow ⬇
-
-N
-
-Undo Last
-
-Ctrl + Z
+pip install pillow exifread
 
 
+🚀 Usage
 
-🛠️ How to Run (From Source)
-
-Prerequisites
-
-You need Python installed. This project relies on Pillow for image processing.
-
-Installation
-
-Clone or download this repository.
-
-Install the required dependency:
-
-pip install Pillow
-
-
-Running the App
+Run the script:
 
 python sorter.py
 
 
-📦 Building the EXE (Windows)
+Load a Folder: Click the "Click to Load Folder" area and select the directory containing the photos you wish to sort.
 
-If you want to create a standalone .exe file to share with friends or run without Python:
+The application will automatically create three new subfolders in the source directory: Keep, Discard, and Maybe.
 
-Install PyInstaller:
+Start Sorting: Use the keyboard shortcuts (recommended) or the sidebar buttons to move the current image to the corresponding folder.
+
+Persistence:
+
+As you sort, the file names are logged in turbo_sorter_log.json inside your source folder.
+
+If you close the app and reopen the same folder, only unsorted images will appear in the queue.
+
+Undo: Press Ctrl+Z to reverse the last move action, placing the file back into the source folder and allowing you to re-sort it.
+
+📦 Building an Executable (PyInstaller)
+
+If you want to create a standalone application that does not require the user to install Python or the required libraries, follow these steps using PyInstaller.
+
+Step 1: Install PyInstaller
 
 pip install pyinstaller
 
 
-Generate an Icon (Optional):
-Ensure you have a valid .ico file named app.ico. You cannot simply rename a PNG; use a converter or a Python script to save it as format='ICO'.
+Step 2: Build the Executable
 
-Build Command:
-Run this in your terminal:
+Since this is a GUI application (Tkinter), you must use the --noconsole (or --windowed) flag to prevent a terminal window from opening alongside the GUI. The --onefile flag creates a single executable file.
 
-pyinstaller --onefile --windowed --icon=app.ico sorter.py
+Run this command from your terminal, located in the directory of your sorter.py script:
+
+pyinstaller --onefile --noconsole --name "TurboSorter" sorter.py
 
 
-Locate App:
-Your sorter.exe will appear in the dist folder.
+Step 3: Find the Executable
 
-⚠️ Important Usage Notes
+After compilation, PyInstaller will create a few directories:
 
-Background Queue: Because the app is multi-threaded, file copying happens in the background.
+build/: Contains temporary build files.
 
-Do not close the app until the sidebar says "✔ All writes finished".
+__pycache__/: Python cache files.
 
-If you close it while it says "⚠ Writing X files...", the last few images may not be copied.
+dist/: This is where your final executable is located.
 
-Windows Defender: When running the EXE for the first time, Windows may warn you ("Unknown Publisher"). This is normal for Python apps not signed with a paid certificate. Click More Info -> Run Anyway.
-
-📝 License
-
-Free to use and modify. Happy Sorting!
+The finished executable (TurboSorter.exe on Windows, or TurboSorter on macOS/Linux) will be in the dist folder. You can distribute this file directly to users.
