@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+dist/
+build/
+turbo_sorter_log.json
+turbo_sorter_statistics.txt
+.vscode/
+.idea/
+*.egg-info/
