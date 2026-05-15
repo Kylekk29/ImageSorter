@@ -1,11 +1,4 @@
-.venv/
 __pycache__/
+.venv/
 *.pyc
-*.pyo
-dist/
-build/
-turbo_sorter_log.json
-turbo_sorter_statistics.txt
-.vscode/
-.idea/
-*.egg-info/
+turbo_sorter_config.json
