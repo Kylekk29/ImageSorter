@@ -1,3 +1,5 @@
+**English** | [简体中文](README.zh-CN.md)
+
 # Turbo Photo Sorter
 
 Fast, keyboard-driven photo triage for Windows. Flip through a folder, mark each photo **Keep**, **Discard** or **Maybe**, make quick brightness and contrast fixes, and get your sorted copies in subfolders. Your original files are never changed.
