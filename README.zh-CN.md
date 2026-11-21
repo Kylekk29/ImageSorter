@@ -2,70 +2,62 @@
 
 # Turbo Photo Sorter（极速照片筛选器）
 
-适用于 Windows 的快速、键盘驱动的照片筛选工具。逐张翻看文件夹里的照片，把每张标记为**保留**、**丢弃**或**待定**，可快速调整亮度和对比度，整理好的副本会放进子文件夹。你的原始文件永远不会被改动。
+Turbo Photo Sorter 是一款开源的 Windows 照片筛选工具。使用键盘把照片标为**保留**、**丢弃**或**待定**。程序会把副本放进相应的子文件夹，原始照片保持不变。
 
-[![Release](https://img.shields.io/github/v/release/Kylekk29/ImageSorter)](https://github.com/Kylekk29/ImageSorter/releases/latest)
+## 下载 Windows x64 版
 
-## 下载
+下载 [TurboPhotoSorter-1.1.0-x64-Portable.exe](https://github.com/Kylekk29/ImageSorter/releases/download/v1.1.0/TurboPhotoSorter-1.1.0-x64-Portable.exe)，双击即可运行，无需安装。
 
-从[最新发布](https://github.com/Kylekk29/ImageSorter/releases/latest)下载 `TurboPhotoSorter-1.0.0-x64-Portable.exe`。它是单个文件，无需安装。由于程序没有代码签名，Windows SmartScreen 可能会提示警告：请选择**更多信息 → 仍要运行**。
+程序未签名，Windows SmartScreen 可能会显示提示。[发布页面](https://github.com/Kylekk29/ImageSorter/releases/latest)提供 SHA-256 校验值。
 
-## 功能
+## 筛选照片
 
-- 把一个文件夹或同一文件夹中的照片拖到窗口中。拖入照片时，只筛选拖入的文件。
-- 三选一分类，完成后自动跳到下一张未分类照片。`Ctrl+Z` 撤销本次会话中的上一次分类，并移除对应的输出副本。
-- 按 `[`、`]` 或点击缩略图可直接浏览。胶片条会在本次会话中已分类的照片上显示勾号。
-- 后台加载预览，按需加载胶片条缩略图
-- 非破坏性的亮度和对比度调整、缩放和平移、全屏
-- EXIF 信息面板（相机、镜头、曝光）
-- 深色和浅色主题
-- 进度按文件夹保存，退出后可继续，不必重新筛选
+1. 把一个文件夹或同一文件夹内选中的照片拖到预览区。也可以按 `Ctrl+O` 打开文件夹。
+2. 按 `K` 保留、`N` 丢弃或 `M` 标为待定。保存成功后，程序会跳到下一张未分类的照片。
+3. 按 `[`、`]` 或点击缩略图浏览。按 `Ctrl+Z` 可撤销本次会话中的上一次分类，并移除该操作生成的副本。
 
-## 键盘快捷键
+程序支持 JPEG、PNG、TIFF、WebP 和 BMP。浏览时按需加载缩略图。侧栏可调整亮度和对比度、查看 EXIF 信息，并切换深色或浅色主题。
 
-| 按键 | 操作 |
-|---|---|
-| `→` / `K` / `Space` | 保留 |
-| `↓` / `N` | 丢弃 |
+| 快捷键 | 操作 |
+| --- | --- |
+| `K`、`→` 或 `Space` | 保留 |
+| `N` 或 `↓` | 丢弃 |
 | `M` | 待定 |
-| `[` / `]` | 浏览上一张 / 下一张照片 |
+| `[` / `]` | 浏览上一张或下一张 |
 | `Ctrl+Z` | 撤销 |
 | `Ctrl+O` | 打开文件夹 |
-| `F11` | 全屏（`Esc` 退出） |
-| `+` / `-` / `0` | 放大 / 缩小 / 重置 |
-| 鼠标滚轮 | 缩放 |
-| 中键或右键拖动 | 平移 |
+| `F11` / `Esc` | 进入或退出全屏 |
+| 鼠标滚轮或 `+` / `-` | 缩放 |
+| `0` | 重置缩放 |
+| 鼠标中键或右键拖动 | 平移缩放后的预览 |
 
-## 输出
+## 文件保存位置
 
-筛选时会把文件复制到你的源文件夹中：
+分类结果保存在原始照片所在的文件夹中。
 
-```
-YourPhotos/
-├── Keep/  Discard/  Maybe/                      # 原图的副本
-├── Keep_Modified/  Discard_Modified/  Maybe_Modified/   # 已应用你调整的副本
-└── turbo_sorter_log.json                        # 记录哪些文件已处理（用于继续）
-```
+- `Keep/`、`Discard/` 和 `Maybe/` 保存原图副本。
+- `Keep_Modified/`、`Discard_Modified/` 和 `Maybe_Modified/` 保存应用亮度和对比度调整后的原分辨率副本。
+- `turbo_sorter_log.json` 记录已分类的照片。重新打开文件夹后可继续筛选。
 
-副本和进度记录保存成功后才会更新进度。如果目标文件已存在，程序会保留现有文件并提示冲突。
+所需副本保存成功后才会更新进度。目标位置有同名文件时，程序会提示冲突，并保留现有文件。
 
-## 从源码运行
+## 从源码运行或构建
 
-需要 Python 3.10+ 和 Tkinter（Windows 标准安装包已包含）。
+需要 Python 3.10 或更新版本，以及 Tkinter。构建 Windows x64 版时，请在 Windows 上使用 x86 64 位 Python。
 
-```bash
-pip install -r requirements.txt
+```powershell
+python -m pip install -r requirements.txt
 python main.py
 ```
 
-`requirements.txt` 里还列出了 PyInstaller，只有构建 exe 时才需要。
+在 PowerShell 中运行以下命令，便携版会生成在 `dist/` 中。
 
-## 构建 exe
-
-```bash
-pyinstaller --name TurboPhotoSorter --windowed --onefile --exclude-module PySide6 main.py
+```powershell
+.\build.ps1
 ```
 
-## 许可证
+运行 `python -m unittest discover -s tests -v` 可执行回归测试。
 
-MIT，见 [LICENSE](LICENSE)。
+## 开源许可
+
+本项目的源代码采用 [MIT 许可证](LICENSE)。便携版内含项目许可证及随附依赖的许可声明。

@@ -2,70 +2,62 @@
 
 # Turbo Photo Sorter
 
-Fast, keyboard-driven photo triage for Windows. Flip through a folder, mark each photo **Keep**, **Discard** or **Maybe**, make quick brightness and contrast fixes, and get your sorted copies in subfolders. Your original files are never changed.
+Turbo Photo Sorter is an open-source Windows app for reviewing photos with the keyboard. Mark each shot **Keep**, **Discard**, or **Maybe**. The app puts copies in category folders and keeps your originals intact.
 
-[![Release](https://img.shields.io/github/v/release/Kylekk29/ImageSorter)](https://github.com/Kylekk29/ImageSorter/releases/latest)
+## Download for Windows x64
 
-## Download
+[Download TurboPhotoSorter-1.1.0-x64-Portable.exe](https://github.com/Kylekk29/ImageSorter/releases/download/v1.1.0/TurboPhotoSorter-1.1.0-x64-Portable.exe) and double-click it. The portable app runs without an installer.
 
-Get `TurboPhotoSorter-1.0.0-x64-Portable.exe` from the [latest release](https://github.com/Kylekk29/ImageSorter/releases/latest). It is a single file; nothing is installed. Windows SmartScreen may warn because the app is not code-signed: choose **More info → Run anyway**.
+The executable is unsigned, so Windows SmartScreen may show a prompt. The [release page](https://github.com/Kylekk29/ImageSorter/releases/latest) includes its SHA-256 checksum.
 
-## Features
+## Review photos
 
-- Drop a folder or selected photos from one folder onto the window. When you drop files, the review queue contains only those files.
-- Three-way sorting with auto-advance. `Ctrl+Z` restores the last decision in the current session and removes its output copies.
-- Browse without sorting using `[` and `]`, or click a thumbnail. The filmstrip shows a checkmark on photos reviewed during the session.
-- Background preview loading and on-demand filmstrip thumbnails
-- Non-destructive brightness and contrast, zoom and pan, fullscreen
-- EXIF panel (camera, lens, exposure)
-- Dark and light themes
-- Progress is saved per folder, so you can quit and resume without re-sorting
+1. Drop a folder or select photos from one folder and drop them onto the preview. You can also open a folder with `Ctrl+O`.
+2. Press `K` to keep, `N` to discard, or `M` to mark a photo as maybe. After saving, the app advances to the next unreviewed photo.
+3. Use `[` and `]` or click a thumbnail to browse. Press `Ctrl+Z` to undo the last decision in the current session and remove its output copies.
 
-## Keyboard shortcuts
+The app supports JPEG, PNG, TIFF, WebP, and BMP. The filmstrip loads thumbnails as you browse. Use the sidebar for brightness, contrast, EXIF details, and light or dark mode.
 
-| Key | Action |
-|---|---|
-| `→` / `K` / `Space` | Keep |
-| `↓` / `N` | Discard |
+| Shortcut | Action |
+| --- | --- |
+| `K`, `→`, or `Space` | Keep |
+| `N` or `↓` | Discard |
 | `M` | Maybe |
-| `[` / `]` | Browse to previous / next photo without sorting |
+| `[` / `]` | Browse left or right |
 | `Ctrl+Z` | Undo |
-| `Ctrl+O` | Open folder |
-| `F11` | Fullscreen (`Esc` exits) |
-| `+` / `-` / `0` | Zoom in / out / reset |
-| Mouse wheel | Zoom |
-| Middle or right drag | Pan |
+| `Ctrl+O` | Open a folder |
+| `F11` / `Esc` | Enter or leave fullscreen |
+| Mouse wheel or `+` / `-` | Zoom |
+| `0` | Reset zoom |
+| Middle or right mouse drag | Pan the zoomed preview |
 
-## Output
+## Where the files go
 
-Sorting copies files into your source folder:
+The source folder holds the output.
 
-```
-YourPhotos/
-├── Keep/  Discard/  Maybe/                      # copies of the originals
-├── Keep_Modified/  Discard_Modified/  Maybe_Modified/   # copies with your adjustments baked in
-└── turbo_sorter_log.json                        # which files are done (enables resume)
-```
+- `Keep/`, `Discard/`, and `Maybe/` contain copies of the originals.
+- `Keep_Modified/`, `Discard_Modified/`, and `Maybe_Modified/` contain full-resolution copies with your brightness and contrast changes.
+- `turbo_sorter_log.json` records completed decisions so you can resume when you reopen the folder.
 
-Progress advances after the requested copies and the progress log are saved. If the destination filename already exists, the app keeps that file and reports the collision.
+The app updates progress after saving the requested copies. If a destination already contains a file with the same name, the app reports the conflict and preserves the existing file.
 
-## Run from source
+## Run or build from source
 
-Python 3.10+ with Tkinter (included in the standard Windows installer).
+Use Python 3.10 or later with Tkinter. To produce the Windows x64 executable, use 64-bit x86 Python on Windows.
 
-```bash
-pip install -r requirements.txt
+```powershell
+python -m pip install -r requirements.txt
 python main.py
 ```
 
-`requirements.txt` also lists PyInstaller, which is only needed to build the exe.
+Build the portable executable into `dist/` with PowerShell.
 
-## Build the exe
-
-```bash
-pyinstaller --name TurboPhotoSorter --windowed --onefile --exclude-module PySide6 main.py
+```powershell
+.\build.ps1
 ```
 
-## License
+Run the regression tests with `python -m unittest discover -s tests -v`.
 
-MIT, see [LICENSE](LICENSE).
+## Open source
+
+The project's source code is available under the [MIT License](LICENSE). The portable executable includes the project's license and bundled dependency notices.

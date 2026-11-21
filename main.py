@@ -16,6 +16,7 @@ from tkinterdnd2 import COPY, DND_FILES, REFUSE_DROP, TkinterDnD
 from sorting import load_progress, save_decision, undo_decision
 
 # ───── Config ─────
+APP_VERSION = "1.1.0"
 CONFIG_FILE = "turbo_sorter_config.json"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".webp", ".bmp"}
 ACTIONS = {"keep": "Keep", "discard": "Discard", "maybe": "Maybe"}
@@ -104,7 +105,7 @@ class ImageLoader:
 class TurboSorter:
     def __init__(self, root):
         self.root = root
-        self.root.title("Turbo Photo Sorter v3.0")
+        self.root.title(f"Turbo Photo Sorter {APP_VERSION}")
         self.root.geometry("1600x1000")
         self.root.minsize(1200, 700)
 
