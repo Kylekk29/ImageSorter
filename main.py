@@ -1,32 +1,26 @@
-# ===============================================
-# TURBO PHOTO SORTER v3.0 — Enhanced UI/UX Edition
-# Features:
-# 1. Zero-Lag Multithreaded Loading
-# 2. Non-Destructive Brightness & Contrast
-# 3. Saves Modified Images to separate folders
-# 4. Modern UI with Filmstrip Preview
-# 5. Drag & Drop Support
-# 6. Fullscreen Mode
-# 7. Mouse Wheel Zoom
-# 8. Keyboard Shortcut Hints
-# ===============================================
+"""Keyboard-driven photo culling for Windows."""
 
 import os
 import json
-import shutil
-import threading
-import queue
-import math
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+from pathlib import Path
 from tkinter import (
-    Tk, Canvas, Frame, Label, Button, Text,
+    Canvas, Frame, Label, Button, Text, TclError,
     filedialog, messagebox, ttk, Scale, HORIZONTAL, Toplevel
 )
 import exifread
-from PIL import Image, ImageTk, ImageOps, ImageEnhance
+from PIL import Image, ImageTk, ImageOps, ImageEnhance, ExifTags
+from tkinterdnd2 import COPY, DND_FILES, REFUSE_DROP, TkinterDnD
+
+from sorting import load_progress, save_decision, undo_decision
 
 # ───── Config ─────
 CONFIG_FILE = "turbo_sorter_config.json"
-LOG_FILE_NAME = "turbo_sorter_log.json"
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".webp", ".bmp"}
+ACTIONS = {"keep": "Keep", "discard": "Discard", "maybe": "Maybe"}
+THUMB_WIDTH = 120
+FRAME_INTERVAL_MS = 16
 
 THEMES = {
     "dark": {
@@ -74,22 +68,21 @@ class ImageLoader:
             except:
                 exif_text = "EXIF Error"
 
-            # 2. Load Image (Disk I/O)
-            img = Image.open(path)
-            
-            # 3. Rotate (CPU Intensive)
-            img = ImageOps.exif_transpose(img)
-            img = img.convert("RGB")
+            with Image.open(path) as source:
+                if source.format == "JPEG":
+                    width, height = source.size
+                    if source.getexif().get(ExifTags.Base.Orientation, 1) in (5, 6, 7, 8):
+                        width, height = height, width
+                    scale = min(target_width / width, target_height / height, 1)
+                    # Use the fitted size in the JPEG's stored orientation.
+                    source.draft("RGB", (max(1, int(source.width * scale)),
+                                         max(1, int(source.height * scale))))
+                image = ImageOps.exif_transpose(source)
+                if image.mode != "RGB":
+                    image = image.convert("RGB")
+            image.thumbnail((target_width, target_height), Image.Resampling.LANCZOS)
+            return image, exif_text
 
-            # 4. Smart Resize (CPU Intensive)
-            ratio = min(target_width / img.width, target_height / img.height) * 0.99
-            new_w = int(img.width * ratio)
-            new_h = int(img.height * ratio)
-            
-            resized_img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-            
-            return resized_img, exif_text
-            
         except Exception as e:
             print(f"Loader Error: {e}")
             return None, str(e)
@@ -98,12 +91,13 @@ class ImageLoader:
     def load_thumbnail(path, thumb_size=120):
         """Load a small thumbnail for the filmstrip."""
         try:
-            img = Image.open(path)
-            img = ImageOps.exif_transpose(img)
-            img = img.convert("RGB")
-            img.thumbnail((thumb_size, thumb_size), Image.Resampling.LANCZOS)
-            return img
-        except:
+            with Image.open(path) as source:
+                if source.format == "JPEG":
+                    source.draft("RGB", (thumb_size, thumb_size))
+                image = ImageOps.exif_transpose(source).convert("RGB")
+            image.thumbnail((thumb_size, thumb_size), Image.Resampling.LANCZOS)
+            return image
+        except (OSError, ValueError, Image.DecompressionBombError):
             return None
 
 
@@ -115,25 +109,31 @@ class TurboSorter:
         self.root.minsize(1200, 700)
 
         # State
-        self.source_dir = ""
-        self.keep_dir = self.discard_dir = self.maybe_dir = ""
-        self.keep_mod_dir = self.discard_mod_dir = self.maybe_mod_dir = ""
-        
+        self.source_dir = None
         self.image_list = []
         self.current_index = 0
         self.history = []
         self.processed_files = set()
-        
-        # Caching / Threading State
+        self.remaining = 0
+
+        self.preview_pool = ThreadPoolExecutor(max_workers=2)
+        self.thumb_pool = ThreadPoolExecutor(max_workers=2)
+        self.save_pool = ThreadPoolExecutor(max_workers=1)
+        self.preview_jobs = {}
+        self.thumb_jobs = {}
         self.cache = {}
         self.thumb_cache = {}
-        self.load_queue = queue.Queue()
-        self.thumb_load_queue = queue.Queue()
+        self.thumb_slots = {}
+        self.save_job = None
         self.canvas_dim = (1200, 900)
-        
+        self.preview_dim = (root.winfo_screenwidth(), root.winfo_screenheight())
+
         # Display State
         self.base_image = None
         self.photo_ref = None
+        self.render_job = None
+        self.adjustment_key = None
+        self.adjusted_preview = None
         self.brightness_val = 1.0
         self.contrast_val = 1.0
 
@@ -148,17 +148,19 @@ class TurboSorter:
         # Fullscreen State
         self.is_fullscreen = False
         self.fullscreen_window = None
+        self.fs_photo = None
 
         self.dark_mode = True
         self.colors = THEMES["dark"]
 
         self.load_config()
         self.build_ui()
+        self.bind_drop_target(self.root)
         self.bind_keys()
         
         # Start queue listeners
-        self.check_queue()
-        self.check_thumb_queue()
+        self.check_jobs()
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
 
     def build_ui(self):
         self.root.configure(bg=self.colors["bg"])
@@ -181,10 +183,12 @@ class TurboSorter:
         self.canvas.grid(row=0, column=0, sticky="nsew")
         self.canvas.bind("<Configure>", self.on_resize)
 
-        self.placeholder = Label(self.canvas, text="📁  Click or Drag Folder Here\n\nPress Ctrl+O to open",
+        self.placeholder = Label(self.canvas, text="📁  Drop photos or a folder here\n\nClick here or press Ctrl+O",
                                  font=("Segoe UI", 20), bg=self.colors["bg"], fg=self.colors["text_dim"],
                                  justify="center")
         self.placeholder.place(relx=0.5, rely=0.5, anchor="center")
+
+        self.placeholder.bind("<Button-1>", lambda event: self.load_source())
 
         self.loading_label = Label(self.canvas, text="⏳ LOADING...", 
                                    font=("Segoe UI", 36, "bold"), bg=self.colors["bg"], fg=self.colors["highlight"])
@@ -252,7 +256,7 @@ class TurboSorter:
                                   highlightthickness=0, troughcolor=self.colors["bg"], 
                                   activebackground=self.colors["highlight"],
                                   length=250, sliderrelief="flat")
-        self.scale_bright.set(1.0)
+        self.scale_bright.set(self.brightness_val)
         self.scale_bright.pack(fill="x")
 
         # Contrast
@@ -266,7 +270,7 @@ class TurboSorter:
                                     highlightthickness=0, troughcolor=self.colors["bg"], 
                                     activebackground=self.colors["highlight"],
                                     length=250, sliderrelief="flat")
-        self.scale_contrast.set(1.0)
+        self.scale_contrast.set(self.contrast_val)
         self.scale_contrast.pack(fill="x")
         
         btn_reset = Button(adj_frame, text="↺ Reset Adjustments", command=self.reset_adjustments,
@@ -286,6 +290,13 @@ class TurboSorter:
         self.btn_maybe = self.mk_btn(btn_frame, "?  MAYBE", self.colors["maybe"], 
                                      lambda: self.sort("maybe"), "M")
         self.btn_undo = self.mk_btn(btn_frame, "↩  UNDO", "#555", self.undo, "Ctrl+Z")
+
+        navigation = Frame(btn_frame, bg=self.colors["panel"])
+        navigation.pack(fill="x", pady=(4, 0))
+        for label, offset in (("Previous  [", -1), ("Next  ]", 1)):
+            Button(navigation, text=label, command=lambda step=offset: self.browse(step),
+                   bg=self.colors["bg"], fg=self.colors["fg"], relief="flat",
+                   cursor="hand2").pack(side="left", fill="x", expand=True, padx=2)
 
         # --- Zoom Controls ---
         zoom_frame = Frame(pad, bg=self.colors["panel"])
@@ -337,25 +348,21 @@ class TurboSorter:
         # --- 3. Filmstrip (Bottom) ---
         self.filmstrip_frame = Frame(self.root, bg=self.colors["filmstrip_bg"], 
                                      highlightbackground=self.colors["border"], highlightthickness=1,
-                                     height=100)
+                                     height=108)
         self.filmstrip_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=5, pady=(0, 2))
         self.filmstrip_frame.grid_propagate(False)
 
         # Filmstrip canvas for scrolling
         self.filmstrip_canvas = Canvas(self.filmstrip_frame, bg=self.colors["filmstrip_bg"], 
                                        highlightthickness=0, height=90)
-        self.filmstrip_canvas.pack(side="left", fill="both", expand=True)
-
-        # Filmstrip scrollbar
-        self.filmstrip_scrollbar = ttk.Scrollbar(self.filmstrip_frame, orient="horizontal", 
-                                                  command=self.filmstrip_canvas.xview)
-        self.filmstrip_scrollbar.pack(side="bottom", fill="x")
-        self.filmstrip_canvas.configure(xscrollcommand=self.filmstrip_scrollbar.set)
-
-        self.filmstrip_inner = Frame(self.filmstrip_canvas, bg=self.colors["filmstrip_bg"])
-        self.filmstrip_canvas.create_window((0, 0), window=self.filmstrip_inner, anchor="nw")
-
-        self.filmstrip_thumb_refs = []  # Keep references to prevent garbage collection
+        self.thumb_slots.clear()
+        scrollbar = ttk.Scrollbar(self.filmstrip_frame, orient="horizontal",
+                                  command=self.scroll_filmstrip)
+        scrollbar.pack(side="bottom", fill="x")
+        self.filmstrip_canvas.pack(fill="both", expand=True)
+        self.filmstrip_canvas.configure(xscrollcommand=scrollbar.set)
+        self.filmstrip_canvas.bind("<Configure>", self.draw_filmstrip)
+        self.filmstrip_canvas.bind("<Button-1>", self.select_thumbnail)
 
         # --- 4. Status Bar ---
         self.status_bar = Frame(self.root, bg=self.colors["panel"], height=24,
@@ -363,7 +370,7 @@ class TurboSorter:
         self.status_bar.grid(row=2, column=0, columnspan=2, sticky="ew", padx=5, pady=(0, 5))
         self.status_bar.grid_propagate(False)
 
-        self.status_label = Label(self.status_bar, text="Ready — Click to load a folder or press Ctrl+O",
+        self.status_label = Label(self.status_bar, text="Ready — Drop photos or open a folder with Ctrl+O",
                                   bg=self.colors["panel"], fg=self.colors["text_dim"],
                                   font=("Segoe UI", 9), anchor="w", padx=10)
         self.status_label.pack(side="left", fill="x", expand=True)
@@ -374,6 +381,8 @@ class TurboSorter:
 
         # Setup interactions
         self.setup_interactions()
+        self.bind_drop_target(self.canvas)
+        self.bind_drop_target(self.placeholder)
 
     def setup_interactions(self):
         """Setup mouse interactions for the canvas."""
@@ -421,7 +430,9 @@ class TurboSorter:
 
     def on_pan_end(self, event):
         """End panning."""
-        self.is_dragging = False
+        if self.is_dragging:
+            self.is_dragging = False
+            self.refresh_image_visuals()
         self.canvas.config(cursor="crosshair")
 
     def zoom_in(self):
@@ -476,6 +487,10 @@ class TurboSorter:
 
     def on_resize(self, event):
         self.canvas_dim = (event.width, event.height)
+        if self.base_image is not None:
+            self.refresh_image_visuals()
+        elif self.source_dir is not None and self.current_index >= len(self.image_list):
+            self.show_finished()
 
     # ───── ADJUSTMENT LOGIC ─────
     def on_brightness_change(self, val):
@@ -495,38 +510,55 @@ class TurboSorter:
         self.contrast_val = 1.0
         if self.base_image:
             self.refresh_image_visuals()
-        self.update_status("Adjustments reset")
+
+
+    def render_preview(self, canvas, width, height, pan_x=0, pan_y=0):
+        canvas.delete("img_tag")
+        if self.base_image is None:
+            return None
+        key = (self.base_image, self.brightness_val, self.contrast_val)
+        if self.adjustment_key is None or (
+            key[0] is not self.adjustment_key[0] or key[1:] != self.adjustment_key[1:]
+        ):
+            image = self.base_image
+            if self.brightness_val != 1:
+                image = ImageEnhance.Brightness(image).enhance(self.brightness_val)
+            if self.contrast_val != 1:
+                image = ImageEnhance.Contrast(image).enhance(self.contrast_val)
+            self.adjustment_key, self.adjusted_preview = key, image
+        image = self.adjusted_preview
+        scale = min(width / image.width, height / image.height) * 0.99 * self.zoom_level
+        scaled_width = max(1, int(image.width * scale))
+        scaled_height = max(1, int(image.height * scale))
+        origin_x = (width - scaled_width) // 2 + pan_x
+        origin_y = (height - scaled_height) // 2 + pan_y
+        left, top = max(0, origin_x), max(0, origin_y)
+        right = min(width, origin_x + scaled_width)
+        bottom = min(height, origin_y + scaled_height)
+        if left >= right or top >= bottom:
+            return None
+        # Render only pixels inside the viewport, even at high zoom.
+        x_ratio, y_ratio = image.width / scaled_width, image.height / scaled_height
+        box = ((left - origin_x) * x_ratio, (top - origin_y) * y_ratio,
+               min(image.width, (right - origin_x) * x_ratio),
+               min(image.height, (bottom - origin_y) * y_ratio))
+        sampling = Image.Resampling.BILINEAR if self.is_dragging else Image.Resampling.LANCZOS
+        image = image.resize((right - left, bottom - top), sampling, box=box)
+        photo = ImageTk.PhotoImage(image)
+        canvas.create_image(left, top, anchor="nw", image=photo, tags="img_tag")
+        canvas.tag_lower("img_tag")
+        return photo
 
     def refresh_image_visuals(self):
-        """Applies brightness, contrast, and zoom to the cached base image and updates canvas."""
-        if not self.base_image:
-            return
+        if self.render_job is None:
+            self.render_job = self.root.after(FRAME_INTERVAL_MS, self.render_frame)
 
-        img = self.base_image
-        
-        if self.brightness_val != 1.0:
-            enhancer = ImageEnhance.Brightness(img)
-            img = enhancer.enhance(self.brightness_val)
-        
-        if self.contrast_val != 1.0:
-            enhancer = ImageEnhance.Contrast(img)
-            img = enhancer.enhance(self.contrast_val)
-        
-        # Apply zoom
-        if self.zoom_level != 1.0:
-            new_w = int(img.width * self.zoom_level)
-            new_h = int(img.height * self.zoom_level)
-            img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-        
-        # Display
-        self.photo_ref = ImageTk.PhotoImage(img)
-        self.canvas.delete("img_tag")
-        
-        cw, ch = self.canvas_dim
-        cx = cw // 2 + self.pan_x
-        cy = ch // 2 + self.pan_y
-        self.canvas.create_image(cx, cy, image=self.photo_ref, anchor="center", tags="img_tag")
-        self.canvas.tag_lower("img_tag")
+    def render_frame(self):
+        self.render_job = None
+        if self.is_fullscreen:
+            self.update_fullscreen_image()
+        else:
+            self.photo_ref = self.render_preview(self.canvas, *self.canvas_dim, self.pan_x, self.pan_y)
 
     # ───── FULLSCREEN ─────
     def toggle_fullscreen(self):
@@ -554,69 +586,33 @@ class TurboSorter:
         self.fs_canvas = Canvas(self.fullscreen_window, bg=self.colors["bg"], highlightthickness=0)
         self.fs_canvas.pack(fill="both", expand=True)
         
-        # Display current image
-        self.update_fullscreen_image()
-        
-        # Bind keys for fullscreen
-        self.fullscreen_window.bind("<Escape>", lambda e: self.exit_fullscreen())
-        self.fullscreen_window.bind("<F11>", lambda e: self.exit_fullscreen())
-        self.fullscreen_window.bind("<Right>", lambda e: self.sort("keep"))
-        self.fullscreen_window.bind("<Down>", lambda e: self.sort("discard"))
-        self.fullscreen_window.bind("<m>", lambda e: self.sort("maybe"))
-        self.fullscreen_window.bind("<Control-z>", lambda e: self.undo())
+        self.fs_canvas.bind("<Configure>", lambda event: self.refresh_image_visuals())
+        self.fullscreen_window.protocol("WM_DELETE_WINDOW", self.exit_fullscreen)
+        self.fullscreen_window.bind("<Escape>", lambda event: self.exit_fullscreen())
         self.fullscreen_window.bind("<MouseWheel>", self.on_fs_mousewheel)
-        
-        # Show overlay hints briefly
-        self.show_fullscreen_hints()
+        self.bind_keys(self.fullscreen_window)
+        self.fs_canvas.focus_set()
+        self.refresh_image_visuals()
+        canvas = self.fs_canvas
+        self.root.after_idle(lambda: self.show_fullscreen_hints() if self.fs_canvas is canvas else None)
 
     def update_fullscreen_image(self):
-        """Update the fullscreen canvas with current image."""
-        if not self.fullscreen_window or not self.base_image:
+        if not self.is_fullscreen:
             return
-        
-        # Get fullscreen dimensions
-        self.fs_canvas.update_idletasks()
-        fw = self.fs_canvas.winfo_width()
-        fh = self.fs_canvas.winfo_height()
-        
-        if fw < 10 or fh < 10:
-            self.root.after(100, self.update_fullscreen_image)
-            return
-        
-        # Load full-res image for fullscreen
+        width = self.fs_canvas.winfo_width()
+        height = self.fs_canvas.winfo_height()
+        self.fs_photo = self.render_preview(self.fs_canvas, width, height)
+        self.fs_canvas.delete("caption")
         if self.current_index < len(self.image_list):
-            path = os.path.join(self.source_dir, self.image_list[self.current_index])
-            try:
-                img = Image.open(path)
-                img = ImageOps.exif_transpose(img)
-                img = img.convert("RGB")
-                
-                # Apply adjustments
-                if self.brightness_val != 1.0:
-                    enhancer = ImageEnhance.Brightness(img)
-                    img = enhancer.enhance(self.brightness_val)
-                if self.contrast_val != 1.0:
-                    enhancer = ImageEnhance.Contrast(img)
-                    img = enhancer.enhance(self.contrast_val)
-                
-                # Resize to fit screen
-                ratio = min(fw / img.width, fh / img.height) * 0.95
-                new_w = int(img.width * ratio)
-                new_h = int(img.height * ratio)
-                img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-                
-                self.fs_photo = ImageTk.PhotoImage(img)
-                self.fs_canvas.delete("all")
-                self.fs_canvas.create_image(fw // 2, fh // 2, image=self.fs_photo, anchor="center")
-                
-                # Show filename at bottom
-                self.fs_canvas.create_text(
-                    fw // 2, fh - 30,
-                    text=f"{self.current_index + 1}/{len(self.image_list)} - {self.image_list[self.current_index]}",
-                    fill=self.colors["text_dim"], font=("Segoe UI", 12)
-                )
-            except Exception as e:
-                print(f"Fullscreen error: {e}")
+            filename = self.image_list[self.current_index]
+            if self.base_image is None:
+                filename = ("Loading…  " if self.current_index not in self.cache
+                            else "Preview unavailable  ") + filename
+        else:
+            filename = "All photos reviewed"
+        self.fs_canvas.create_text(width // 2, height - 24, text=filename,
+                                   fill=self.colors["text_dim"], font=("Segoe UI", 12),
+                                   tags="caption")
 
     def show_fullscreen_hints(self):
         """Show temporary overlay hints in fullscreen."""
@@ -628,7 +624,7 @@ class TurboSorter:
         
         hints = [
             "→ / K: Keep    ↓ / N: Discard    M: Maybe    Ctrl+Z: Undo    Esc: Exit",
-            "Mouse Wheel: Zoom"
+            " [ / ]: Browse    Mouse wheel: Zoom"
         ]
         
         for i, hint in enumerate(hints):
@@ -639,7 +635,8 @@ class TurboSorter:
             )
         
         # Remove hints after 3 seconds
-        self.root.after(3000, lambda: self.fs_canvas.delete("hints"))
+        canvas = self.fs_canvas
+        self.root.after(3000, lambda: canvas.delete("hints") if self.fs_canvas is canvas else None)
 
     def on_fs_mousewheel(self, event):
         """Handle mouse wheel in fullscreen."""
@@ -659,343 +656,382 @@ class TurboSorter:
                 pass
             self.fullscreen_window = None
             self.fs_canvas = None
+            self.fs_photo = None
+        self.refresh_image_visuals()
 
     # ───── LOADING ENGINE ─────
-    def load_source(self, folder=None):
+    def bind_drop_target(self, widget):
+        widget.drop_target_register(DND_FILES)
+        widget.dnd_bind("<<DropEnter>>", lambda event: COPY)
+        widget.dnd_bind("<<Drop:DND_Files>>", self.on_drop)
+
+    def on_drop(self, event):
+        if self.save_job is not None:
+            self.update_status("Wait for the current decision to finish saving")
+            return REFUSE_DROP
+        try:
+            paths = self.root.tk.splitlist(event.data)
+        except TclError:
+            return REFUSE_DROP
+        self.root.after_idle(self.open_dropped_paths, paths)
+        return COPY
+
+    def open_dropped_paths(self, paths):
+        entries = list(dict.fromkeys(Path(path) for path in paths))
+        try:
+            is_folder = len(entries) == 1 and entries[0].is_dir()
+            are_photos = entries and all(entry.suffix.lower() in IMAGE_EXTENSIONS
+                                         and entry.is_file() for entry in entries)
+        except (OSError, ValueError) as error:
+            self.show_error("Could not open dropped files", error)
+            return
+        if is_folder:
+            self.load_source(entries[0])
+            return
+        if not are_photos:
+            self.update_status("Drop a folder or supported photo files")
+            return
+        folder = entries[0].parent
+        if any(entry.parent != folder for entry in entries):
+            self.update_status("Drop photos from one folder at a time")
+            return
+        self.load_source(folder, selected_files=entries)
+
+    def load_source(self, folder=None, *, selected_files=None):
+        if self.save_job is not None:
+            return
         if folder is None:
             folder = filedialog.askdirectory()
         if not folder:
             return
-        
-        self.source_dir = folder
-        
-        # Setup paths
-        self.keep_dir = os.path.join(folder, "Keep")
-        self.discard_dir = os.path.join(folder, "Discard")
-        self.maybe_dir = os.path.join(folder, "Maybe")
-        
-        self.keep_mod_dir = os.path.join(folder, "Keep_Modified")
-        self.discard_mod_dir = os.path.join(folder, "Discard_Modified")
-        self.maybe_mod_dir = os.path.join(folder, "Maybe_Modified")
 
-        for d in [self.keep_dir, self.discard_dir, self.maybe_dir, 
-                  self.keep_mod_dir, self.discard_mod_dir, self.maybe_mod_dir]:
-            os.makedirs(d, exist_ok=True)
-
-        self.processed_log_file = os.path.join(self.source_dir, LOG_FILE_NAME)
-        if os.path.exists(self.processed_log_file):
-            try:
-                with open(self.processed_log_file) as f:
-                    self.processed_files = set(json.load(f).get("processed_files", []))
-            except:
-                self.processed_files = set()
-
-        exts = (".jpg", ".jpeg", ".png", ".tiff", ".tif", ".webp", ".bmp")
-        all_files = sorted([f for f in os.listdir(folder) if f.lower().endswith(exts)])
-        self.image_list = [f for f in all_files if f not in self.processed_files]
-
-        if not self.image_list:
-            messagebox.showinfo("Done", "No new images found!")
+        folder = Path(folder)
+        try:
+            processed = load_progress(folder)
+            entries = folder.iterdir() if selected_files is None else selected_files
+            images = sorted((entry.name for entry in entries
+                             if entry.suffix.lower() in IMAGE_EXTENSIONS
+                             and entry.is_file() and entry.name not in processed),
+                            key=str.casefold)
+        except (OSError, ValueError) as error:
+            messagebox.showerror("Could not open folder", str(error), parent=self.root)
             return
 
-        self.current_index = 0
+        for jobs in (self.preview_jobs, self.thumb_jobs):
+            for future in jobs.values():
+                future.cancel()
+            jobs.clear()
+        self.source_dir = folder
+        self.image_list = images
+        self.processed_files = processed
+        self.remaining = len(images)
+        self.history.clear()
         self.cache.clear()
         self.thumb_cache.clear()
-        self.zoom_level = 1.0
-        self.pan_x = 0
-        self.pan_y = 0
+        self.lbl_action.config(text="Ready", fg=self.colors["text_dim"])
+        self.filmstrip_canvas.delete("all")
+        self.thumb_slots.clear()
+        self.filmstrip_canvas.configure(scrollregion=(0, 0, len(images) * THUMB_WIDTH, 80))
+        self.filmstrip_canvas.xview_moveto(0)
         self.placeholder.place_forget()
-        
-        # Build filmstrip
-        self.build_filmstrip()
-        
-        self.request_image(0)
+        self.show_index(0)
+        if images:
+            self.update_status(f"Loaded {len(images)} photos from {folder.name}")
+        elif selected_files is not None:
+            self.update_status("The dropped photos have already been reviewed")
+        else:
+            self.update_status(f"No unreviewed photos in {folder.name}")
+
+    def scroll_filmstrip(self, *args):
+        self.filmstrip_canvas.xview(*args)
+        self.draw_filmstrip()
+
+    def select_thumbnail(self, event):
+        index = int(self.filmstrip_canvas.canvasx(event.x) // THUMB_WIDTH)
+        self.navigate_to(index)
+        self.canvas.focus_set()
+
+    def draw_filmstrip(self, event=None):
+        canvas = self.filmstrip_canvas
+        start = max(0, int(canvas.canvasx(0) // THUMB_WIDTH))
+        end = min(len(self.image_list),
+                  int(canvas.canvasx(canvas.winfo_width()) // THUMB_WIDTH) + 1)
+        visible = range(start, end)
+        for index in list(self.thumb_jobs):
+            if index not in visible:
+                self.thumb_jobs.pop(index).cancel()
+        self.thumb_cache = {i: self.thumb_cache[i] for i in visible if i in self.thumb_cache}
+        for index in self.thumb_slots.keys() - visible:
+            canvas.delete(f"thumb{index}")
+            del self.thumb_slots[index]
+        for index in visible:
+            if index not in self.thumb_cache and index not in self.thumb_jobs:
+                path = self.source_dir / self.image_list[index]
+                self.thumb_jobs[index] = self.thumb_pool.submit(ImageLoader.load_thumbnail, path, 64)
+            image = self.thumb_cache.get(index)
+            reviewed = self.image_list[index] in self.processed_files
+            selected = index == self.current_index
+            previous = self.thumb_slots.get(index)
+            if previous is not None and image is previous[0] and (reviewed, selected) == previous[1]:
+                continue
+            x = index * THUMB_WIDTH + THUMB_WIDTH // 2
+            tag = f"thumb{index}"
+            canvas.delete(tag)
+            border = self.colors["highlight" if selected else "border"]
+            canvas.create_rectangle(x - 55, 3, x + 55, 80, outline=border, tags=tag)
+            photo = None
+            if image is not None:
+                photo = ImageTk.PhotoImage(image)
+                canvas.create_image(x, 34, image=photo, tags=tag)
+            canvas.create_text(x, 72, text=f"{index + 1}" + ("  ✓" if reviewed else ""),
+                               fill=self.colors["keep" if reviewed else "text_dim"],
+                               font=("Segoe UI", 8), tags=tag)
+            self.thumb_slots[index] = (image, (reviewed, selected), photo)
+
+    def browse(self, step):
+        self.navigate_to(self.current_index + step)
+
+    def navigate_to(self, index):
+        if self.save_job is None and index != self.current_index and 0 <= index < len(self.image_list):
+            self.show_index(index)
+
+    def show_index(self, index):
+        self.current_index = index
+        self.base_image = None
+        self.adjustment_key = None
+        self.adjusted_preview = None
+        self.photo_ref = None
+        self.is_dragging = False
+        self.canvas.configure(cursor="crosshair")
+        self.zoom_level = 1.0
+        self.pan_x = self.pan_y = 0
+        self.reset_adjustments()
+        self.canvas.delete("all")
+        self.loading_label.place_forget()
+        self.exif_box.config(state="normal")
+        self.exif_box.delete("1.0", "end")
+        self.exif_box.config(state="disabled")
         self.update_ui_text()
-        self.update_status(f"Loaded {len(self.image_list)} images from {os.path.basename(folder)}")
 
-    def build_filmstrip(self):
-        """Build the thumbnail filmstrip at the bottom."""
-        # Clear existing
-        for w in self.filmstrip_inner.winfo_children():
-            w.destroy()
-        self.filmstrip_thumb_refs.clear()
-
-        if not self.image_list:
-            return
-
-        # Load thumbnails in background
-        for idx, filename in enumerate(self.image_list):
-            path = os.path.join(self.source_dir, filename)
-            threading.Thread(target=self.thumb_worker, args=(idx, path), daemon=True).start()
-
-    def thumb_worker(self, idx, path):
-        """Background thread for loading thumbnails."""
-        thumb = ImageLoader.load_thumbnail(path, 100)
-        if thumb:
-            self.thumb_load_queue.put((idx, thumb))
-
-    def check_thumb_queue(self):
-        """Process thumbnail loading queue."""
-        try:
-            while True:
-                idx, thumb = self.thumb_load_queue.get_nowait()
-                self.thumb_cache[idx] = thumb
-                self.add_thumb_to_filmstrip(idx, thumb)
-        except queue.Empty:
-            pass
-        self.root.after(100, self.check_thumb_queue)
-
-    def add_thumb_to_filmstrip(self, idx, thumb_img):
-        """Add a thumbnail to the filmstrip UI."""
-        try:
-            photo = ImageTk.PhotoImage(thumb_img)
-            self.filmstrip_thumb_refs.append(photo)
-            
-            # Create clickable thumbnail frame
-            thumb_frame = Frame(self.filmstrip_inner, bg=self.colors["filmstrip_bg"], 
-                               highlightbackground=self.colors["border"], highlightthickness=1,
-                               padx=2, pady=2, cursor="hand2")
-            
-            lbl = Label(thumb_frame, image=photo, bg=self.colors["filmstrip_bg"])
-            lbl.pack()
-            
-            # Highlight current image
-            if idx == self.current_index:
-                thumb_frame.config(highlightbackground=self.colors["highlight"], highlightthickness=2)
-            
-            # Click to navigate
-            lbl.bind("<Button-1>", lambda e, i=idx: self.navigate_to(i))
-            thumb_frame.bind("<Button-1>", lambda e, i=idx: self.navigate_to(i))
-            
-            thumb_frame.pack(side="left", padx=2)
-            
-            # Update scroll region
-            self.filmstrip_inner.update_idletasks()
-            self.filmstrip_canvas.configure(scrollregion=self.filmstrip_canvas.bbox("all"))
-            
-            # Scroll to current
-            if idx == self.current_index:
-                self.filmstrip_canvas.xview_moveto(max(0, (idx - 2) / max(1, len(self.image_list))))
-                
-        except Exception as e:
-            print(f"Thumbnail display error: {e}")
-
-    def navigate_to(self, idx):
-        """Navigate to a specific image index."""
-        if 0 <= idx < len(self.image_list):
-            self.current_index = idx
-            self.zoom_level = 1.0
-            self.pan_x = 0
-            self.pan_y = 0
-            self.request_image(idx)
-            self.update_ui_text()
-            self.update_filmstrip_highlight()
-            self.update_status(f"Image {idx + 1} of {len(self.image_list)}")
-
-    def update_filmstrip_highlight(self):
-        """Update the highlight on the filmstrip."""
-        for i, child in enumerate(self.filmstrip_inner.winfo_children()):
-            if i == self.current_index:
-                child.config(highlightbackground=self.colors["highlight"], highlightthickness=2)
-            else:
-                child.config(highlightbackground=self.colors["border"], highlightthickness=1)
+        if index < len(self.image_list):
+            filename = self.image_list[index]
+            self.filename_label.config(text=filename)
+            self.update_status(f"Photo {index + 1} of {len(self.image_list)}")
+            width = self.filmstrip_canvas.winfo_width()
+            left = self.filmstrip_canvas.canvasx(0)
+            if index * THUMB_WIDTH < left or (index + 1) * THUMB_WIDTH > left + width:
+                offset = max(0, (index + 0.5) * THUMB_WIDTH - width / 2)
+                self.filmstrip_canvas.xview_moveto(offset / (len(self.image_list) * THUMB_WIDTH))
+            self.request_image(index)
+        else:
+            self.filename_label.config(text="")
+            self.show_finished()
+        self.draw_filmstrip()
+        if self.is_fullscreen:
+            self.fs_canvas.delete("img_tag")
+            self.fs_photo = None
+            self.refresh_image_visuals()
 
     def request_image(self, index):
-        if index >= len(self.image_list):
-            self.show_finished()
-            return
-
+        nearby = [i for i in (index, index + 1, index - 1, index + 2)
+                  if 0 <= i < len(self.image_list)]
+        for i in list(self.preview_jobs):
+            if i not in nearby:
+                self.preview_jobs.pop(i).cancel()
+        self.cache = {i: self.cache[i] for i in nearby if i in self.cache}
+        for i in nearby:
+            if i not in self.cache and i not in self.preview_jobs:
+                path = self.source_dir / self.image_list[i]
+                self.preview_jobs[i] = self.preview_pool.submit(
+                    ImageLoader.load_and_process, path, *self.preview_dim
+                )
         if index in self.cache:
-            self.set_current_image_from_cache(self.cache[index])
-            self.trigger_background_load(index + 1)
-            self.trigger_background_load(index + 2)
+            self.display_preview(index)
         else:
+            self.loading_label.config(text="Loading preview…")
             self.loading_label.place(relx=0.5, rely=0.5, anchor="center")
-            self.trigger_background_load(index, priority=True)
 
-    def trigger_background_load(self, index, priority=False):
-        if index >= len(self.image_list): return
-        if index in self.cache: return
-        
-        path = os.path.join(self.source_dir, self.image_list[index])
-        w, h = self.canvas_dim
-        threading.Thread(target=self.background_worker, args=(index, path, w, h), daemon=True).start()
-
-    def background_worker(self, index, path, w, h):
-        img, exif = ImageLoader.load_and_process(path, w, h)
-        self.load_queue.put((index, img, exif))
-
-    def check_queue(self):
-        try:
-            while True:
-                index, img, exif = self.load_queue.get_nowait()
-                self.cache[index] = (img, exif)
-                
+    def check_jobs(self):
+        for index, future in list(self.preview_jobs.items()):
+            if future.done():
+                del self.preview_jobs[index]
+                self.cache[index] = future.result()
                 if index == self.current_index:
-                    self.loading_label.place_forget()
-                    self.set_current_image_from_cache((img, exif))
-                    self.trigger_background_load(index + 1)
-                    self.trigger_background_load(index + 2)
-        except queue.Empty:
-            pass
-        self.root.after(50, self.check_queue)
+                    self.display_preview(index)
 
-    def set_current_image_from_cache(self, data):
-        pil_img, exif_text = data
-        self.base_image = pil_img
-        
-        # Display Info
+        changed = False
+        for index, future in list(self.thumb_jobs.items()):
+            if future.done():
+                del self.thumb_jobs[index]
+                self.thumb_cache[index] = future.result()
+                changed = True
+        if changed:
+            self.draw_filmstrip()
+
+        if self.save_job is not None and self.save_job[0].done():
+            self.finish_sort()
+        self.root.after(FRAME_INTERVAL_MS, self.check_jobs)
+
+    def display_preview(self, index):
+        image, metadata = self.cache[index]
+        self.base_image = image
+        if image is None:
+            self.loading_label.config(text="Preview unavailable")
+            self.loading_label.place(relx=0.5, rely=0.5, anchor="center")
+        else:
+            self.loading_label.place_forget()
         self.exif_box.config(state="normal")
-        self.exif_box.delete(1.0, "end")
-        self.exif_box.insert("end", self.image_list[self.current_index] + "\n" + ("-"*30) + "\n")
-        self.exif_box.insert("end", exif_text)
+        self.exif_box.delete("1.0", "end")
+        self.exif_box.insert("end", self.image_list[index] + "\n" + metadata)
         self.exif_box.config(state="disabled")
-
-        # Update filename in status bar
-        if self.current_index < len(self.image_list):
-            self.filename_label.config(text=self.image_list[self.current_index])
-
-        # Apply brightness and draw
         self.refresh_image_visuals()
 
     # ───── SORTING LOGIC ─────
     def sort(self, action):
-        if self.current_index >= len(self.image_list): return
-
+        if self.save_job is not None or self.current_index >= len(self.image_list):
+            return
         filename = self.image_list[self.current_index]
-        src = os.path.join(self.source_dir, filename)
-        
-        # Determine paths for original and modified
-        target_dir = {
-            "keep": self.keep_dir,
-            "discard": self.discard_dir,
-            "maybe": self.maybe_dir
-        }[action]
-        
-        dst = os.path.join(target_dir, filename)
+        if filename in self.processed_files:
+            self.update_status("Already reviewed. Use Ctrl+Z to undo your latest decision.")
+            return
+        if self.base_image is None and self.current_index not in self.cache:
+            self.update_status("Wait for the current preview before sorting")
+            return
+        adjusted = None
+        if self.base_image is not None and (self.brightness_val != 1 or self.contrast_val != 1):
+            adjusted = partial(self.save_adjusted_image,
+                               brightness=self.brightness_val, contrast=self.contrast_val)
+        future = self.save_pool.submit(save_decision, self.source_dir, filename, ACTIONS[action],
+                                       self.processed_files.copy(), adjusted)
+        self.save_job = (future, self.current_index, action)
+        self.update_status(f"Saving {filename}…")
 
-        # 1. Copy Original (Always)
+    @staticmethod
+    def save_adjusted_image(source, output, brightness, contrast):
+        with Image.open(source) as original:
+            image_format = original.format
+            image = ImageOps.exif_transpose(original)
+            image = image.convert("RGBA" if "A" in image.getbands() or "transparency" in image.info
+                                  else "RGB")
+        if brightness != 1:
+            image = ImageEnhance.Brightness(image).enhance(brightness)
+        if contrast != 1:
+            image = ImageEnhance.Contrast(image).enhance(contrast)
+        image.save(output, format=image_format, quality=95)
+
+    def finish_sort(self):
+        future, index, action = self.save_job
+        self.save_job = None
+        filename = self.image_list[index]
         try:
-            shutil.copy2(src, dst)
-        except Exception as e:
-            print(f"Error copying: {e}")
+            outputs = future.result()
+        except Exception as error:
+            self.show_error("Could not save decision", error)
+            return
 
-        # 2. Save Modified (Only if brightness/contrast changed)
-        if self.brightness_val != 1.0 or self.contrast_val != 1.0:
-            target_mod_dir = {
-                "keep": self.keep_mod_dir,
-                "discard": self.discard_mod_dir,
-                "maybe": self.maybe_mod_dir
-            }[action]
-            dst_mod = os.path.join(target_mod_dir, filename)
-            
-            # Use background thread to save full-res edited image to prevent UI lag
-            threading.Thread(target=self.save_modified_worker, 
-                             args=(src, dst_mod, self.brightness_val, self.contrast_val), 
-                             daemon=True).start()
-
-        self.history.append({"file": filename, "action": action, "src": src, "dst": dst})
         self.processed_files.add(filename)
-        self.save_log()
-
+        self.remaining -= 1
+        self.history.append((index, outputs))
+        next_index = len(self.image_list)
+        if self.remaining:
+            for offset in range(1, len(self.image_list)):
+                candidate = (index + offset) % len(self.image_list)
+                if self.image_list[candidate] not in self.processed_files:
+                    next_index = candidate
+                    break
+        self.show_index(next_index)
         color = self.colors[action]
-        self.lbl_action.config(text=f"{action.upper()}", fg=color)
-        self.flash_overlay(action.upper(), color)
-
-        if (self.current_index - 2) in self.cache:
-            del self.cache[self.current_index - 2]
-
-        self.current_index += 1
-        self.update_ui_text()
-        self.update_filmstrip_highlight()
-        self.request_image(self.current_index)
-        self.update_status(f"{action.upper()} → {filename}")
-        
-    def save_modified_worker(self, src, dst, brightness, contrast):
-        """Re-opens the original file, modifies it, and saves it (Background Thread)."""
-        try:
-            # Re-open original to maintain resolution
-            img = Image.open(src)
-            img = ImageOps.exif_transpose(img)
-            img = img.convert("RGB")
-            
-            # Apply modifications
-            if brightness != 1.0:
-                enhancer = ImageEnhance.Brightness(img)
-                img = enhancer.enhance(brightness)
-            
-            if contrast != 1.0:
-                enhancer = ImageEnhance.Contrast(img)
-                img = enhancer.enhance(contrast)
-            
-            # Save
-            img.save(dst, quality=95)
-        except Exception as e:
-            print(f"Failed to save modified image: {e}")
+        self.lbl_action.config(text=action.upper(), fg=color)
+        if self.remaining:
+            self.flash_overlay(action.upper(), color)
+        self.update_status(f"{ACTIONS[action]} → {filename}" if self.remaining
+                           else f"All {len(self.image_list)} photos reviewed")
 
     def undo(self):
-        if not self.history: return
-        last = self.history.pop()
-        
-        if last["file"] in self.processed_files:
-            self.processed_files.remove(last["file"])
-            self.save_log()
+        if self.save_job is not None or not self.history:
+            return
+        index, outputs = self.history[-1]
+        filename = self.image_list[index]
+        try:
+            cleanup = undo_decision(self.source_dir, filename, outputs, self.processed_files)
+        except OSError as error:
+            self.show_error("Could not undo decision", error)
+            return
 
-        self.current_index -= 1
+        self.history.pop()
+        self.processed_files.remove(filename)
+        self.remaining += 1
+        self.show_index(index)
         self.lbl_action.config(text="UNDO", fg=self.colors["highlight"])
-        self.update_ui_text()
-        self.update_filmstrip_highlight()
-        self.request_image(self.current_index)
-        self.update_status(f"Undo: {last['file']}")
+        if cleanup:
+            self.show_error("Undid decision, but could not remove temporary copies", cleanup)
+        else:
+            self.update_status(f"Undid decision for {filename}")
+
+    def show_error(self, title, error):
+        self.update_status(title)
+        parent = self.fullscreen_window if self.is_fullscreen else self.root
+        messagebox.showerror(title, str(error), parent=parent)
+
+    def close(self):
+        if self.save_job is not None:
+            self.show_error("Save in progress", "Wait for the current decision to finish saving.")
+            return
+        for pool in (self.preview_pool, self.thumb_pool, self.save_pool):
+            pool.shutdown(wait=False, cancel_futures=True)
+        self.root.destroy()
 
     def flash_overlay(self, text, color):
         w = self.canvas.winfo_width()
         tag = self.canvas.create_text(w//2, 100, text=text, fill=color, 
                                       font=("Segoe UI", 60, "bold"))
-        self.root.after(400, lambda: self.canvas.delete(tag))
+        canvas = self.canvas
+        canvas.after(400, lambda: canvas.delete(tag) if canvas.winfo_exists() else None)
 
     def update_ui_text(self):
-        self.progress_text.config(text=f"{self.current_index} / {len(self.image_list)}")
-        if len(self.image_list) > 0:
-            self.progress_bar["maximum"] = len(self.image_list)
-            self.progress_bar["value"] = self.current_index
+        reviewed = len(self.image_list) - self.remaining
+        self.progress_text.config(text=f"{reviewed} / {len(self.image_list)}")
+        self.progress_bar.configure(maximum=max(1, len(self.image_list)), value=reviewed)
 
     def update_status(self, message):
         """Update the status bar message."""
         self.status_label.config(text=message)
 
     def show_finished(self):
-        self.canvas.delete("all")
+        self.canvas.delete("completion")
         self.canvas.create_text(
-            self.canvas.winfo_width() // 2, self.canvas.winfo_height() // 2 - 30,
-            text="🎉 ALL DONE!", font=("Segoe UI", 50, "bold"),
-            fill=self.colors["keep"], anchor="center"
+            self.canvas.winfo_width() // 2, self.canvas.winfo_height() // 2,
+            text="All photos reviewed" if self.image_list else "No unreviewed photos",
+            font=("Segoe UI", 28, "bold"), fill=self.colors["keep"], tags="completion"
         )
-        self.canvas.create_text(
-            self.canvas.winfo_width() // 2, self.canvas.winfo_height() // 2 + 40,
-            text=f"{len(self.image_list)} images processed",
-            font=("Segoe UI", 18), fill=self.colors["text_dim"], anchor="center"
-        )
-        self.update_status("All images processed!")
 
-    def save_log(self):
-        with open(self.processed_log_file, "w") as f:
-            json.dump({"processed_files": list(self.processed_files)}, f)
+    def bind_keys(self, window=None):
+        if window is None:
+            window = self.root
+        shortcuts = {
+            "<Right>": lambda: self.sort("keep"), "<k>": lambda: self.sort("keep"),
+            "<K>": lambda: self.sort("keep"), "<space>": lambda: self.sort("keep"),
+            "<Down>": lambda: self.sort("discard"), "<n>": lambda: self.sort("discard"),
+            "<N>": lambda: self.sort("discard"),
+            "<m>": lambda: self.sort("maybe"), "<M>": lambda: self.sort("maybe"),
+            "<bracketleft>": lambda: self.browse(-1), "<bracketright>": lambda: self.browse(1),
+            "<Control-z>": self.undo, "<F11>": self.toggle_fullscreen,
+            "<plus>": self.zoom_in, "<equal>": self.zoom_in, "<minus>": self.zoom_out,
+            "<Key-0>": self.zoom_reset,
+        }
+        if window is self.root:
+            shortcuts["<Control-o>"] = self.load_source
 
-    def bind_keys(self):
-        self.root.bind("<Right>", lambda e: self.sort("keep"))
-        self.root.bind("<k>", lambda e: self.sort("keep"))
-        self.root.bind("<space>", lambda e: self.sort("keep"))
-        self.root.bind("<Down>", lambda e: self.sort("discard"))
-        self.root.bind("<n>", lambda e: self.sort("discard"))
-        self.root.bind("<m>", lambda e: self.sort("maybe"))
-        self.root.bind("<Control-z>", lambda e: self.undo())
-        self.root.bind("<Control-o>", lambda e: self.load_source())
-        self.root.bind("<F11>", lambda e: self.toggle_fullscreen())
-        self.root.bind("<plus>", lambda e: self.zoom_in())
-        self.root.bind("<equal>", lambda e: self.zoom_in())
-        self.root.bind("<minus>", lambda e: self.zoom_out())
-        self.root.bind("<Key-0>", lambda e: self.zoom_reset())
+        def handle(event, command):
+            if event.keysym == "space" and isinstance(event.widget, Button):
+                return None
+            if event.keysym in ("Left", "Right", "Up", "Down") and isinstance(event.widget, Scale):
+                return None
+            command()
+            return "break"
+
+        for key, command in shortcuts.items():
+            window.bind(key, lambda event, callback=command: handle(event, callback))
 
     def load_config(self):
         try:
@@ -1007,15 +1043,31 @@ class TurboSorter:
             pass
 
     def toggle_theme(self):
+        if self.is_fullscreen:
+            self.exit_fullscreen()
         self.dark_mode = not self.dark_mode
         self.colors = THEMES["dark" if self.dark_mode else "light"]
         with open(CONFIG_FILE, "w") as f:
             json.dump({"dark": self.dark_mode}, f)
+        status = self.status_label.cget("text")
+        action = self.lbl_action.cget("text")
+        for widget in self.root.winfo_children():
+            widget.destroy()
         self.build_ui()
-        if self.current_index < len(self.image_list):
-            self.request_image(self.current_index)
+        self.update_ui_text()
+        self.lbl_action.config(text=action)
+        if self.source_dir is not None:
+            self.placeholder.place_forget()
+            self.filmstrip_canvas.configure(scrollregion=(0, 0, len(self.image_list) * THUMB_WIDTH, 80))
+            if self.current_index < len(self.image_list):
+                self.filename_label.config(text=self.image_list[self.current_index])
+                self.filmstrip_canvas.xview_moveto(max(0, self.current_index - 2) / len(self.image_list))
+                self.request_image(self.current_index)
+            else:
+                self.show_finished()
+        self.update_status(status)
 
 if __name__ == "__main__":
-    root = Tk()
+    root = TkinterDnD.Tk()
     app = TurboSorter(root)
     root.mainloop()

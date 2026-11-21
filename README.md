@@ -12,8 +12,10 @@ Get `TurboPhotoSorter-1.0.0-x64-Portable.exe` from the [latest release](https://
 
 ## Features
 
-- Three-way sorting with undo (`Ctrl+Z`)
-- Background loading and a thumbnail filmstrip for lag-free navigation
+- Drop a folder or selected photos from one folder onto the window. When you drop files, the review queue contains only those files.
+- Three-way sorting with auto-advance. `Ctrl+Z` restores the last decision in the current session and removes its output copies.
+- Browse without sorting using `[` and `]`, or click a thumbnail. The filmstrip shows a checkmark on photos reviewed during the session.
+- Background preview loading and on-demand filmstrip thumbnails
 - Non-destructive brightness and contrast, zoom and pan, fullscreen
 - EXIF panel (camera, lens, exposure)
 - Dark and light themes
@@ -26,6 +28,7 @@ Get `TurboPhotoSorter-1.0.0-x64-Portable.exe` from the [latest release](https://
 | `→` / `K` / `Space` | Keep |
 | `↓` / `N` | Discard |
 | `M` | Maybe |
+| `[` / `]` | Browse to previous / next photo without sorting |
 | `Ctrl+Z` | Undo |
 | `Ctrl+O` | Open folder |
 | `F11` | Fullscreen (`Esc` exits) |
@@ -43,6 +46,8 @@ YourPhotos/
 ├── Keep_Modified/  Discard_Modified/  Maybe_Modified/   # copies with your adjustments baked in
 └── turbo_sorter_log.json                        # which files are done (enables resume)
 ```
+
+Progress advances after the requested copies and the progress log are saved. If the destination filename already exists, the app keeps that file and reports the collision.
 
 ## Run from source
 
