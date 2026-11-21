@@ -1,9 +1,16 @@
 #requires -Version 5.1
-param([string]$Python = "python")
+param(
+    [string]$Python = "python",
+    [string]$InnoCompiler
+)
 
 $ErrorActionPreference = "Stop"
 Push-Location -LiteralPath $PSScriptRoot
 try {
+    if ($InnoCompiler) {
+        $InnoCompiler = (Get-Command $InnoCompiler -CommandType Application -ErrorAction Stop).Source
+    }
+
     $platform = & $Python -c "import sysconfig; print(sysconfig.get_platform())"
     if ($LASTEXITCODE -ne 0 -or $platform -ne "win-amd64") {
         throw "Build with 64-bit x86 Python on Windows."
@@ -19,9 +26,11 @@ try {
     $buildDir = Join-Path $PSScriptRoot "build"
     $distDir = Join-Path $PSScriptRoot "dist"
     $projectLicense = Join-Path $PSScriptRoot "LICENSE"
+    $appIcon = Join-Path $PSScriptRoot "assets/app.ico"
     $arguments = @(
         "-m", "PyInstaller", "--noconfirm", "--onefile", "--windowed", "--name", $name,
         "--specpath", $buildDir, "--workpath", $buildDir, "--distpath", $distDir,
+        "--icon", $appIcon, "--add-data", "${appIcon}:assets",
         "--add-data", "${projectLicense}:.",
         "--copy-metadata", "Pillow", "--copy-metadata", "exifread",
         "--copy-metadata", "tkinterdnd2", "--copy-metadata", "pyinstaller"
@@ -39,6 +48,12 @@ try {
     & $Python @arguments "main.py"
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE." }
     Get-Item -LiteralPath (Join-Path $distDir "$name.exe")
+
+    if ($InnoCompiler) {
+        & $InnoCompiler "/DBuildVersion=$version" (Join-Path $PSScriptRoot "packaging/installer.iss")
+        if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE." }
+        Get-Item -LiteralPath (Join-Path $distDir "TurboPhotoSorter-$version-x64-Setup.exe")
+    }
 } finally {
     Pop-Location
 }

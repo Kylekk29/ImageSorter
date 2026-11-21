@@ -6,13 +6,16 @@ Turbo Photo Sorter is an open-source Windows app for reviewing photos with the k
 
 ## Download for Windows x64
 
-[Download TurboPhotoSorter-1.1.0-x64-Portable.exe](https://github.com/Kylekk29/ImageSorter/releases/download/v1.1.0/TurboPhotoSorter-1.1.0-x64-Portable.exe) and double-click it. The portable app runs without an installer.
+Choose a Windows x64 build from the [latest release](https://github.com/Kylekk29/ImageSorter/releases/latest).
 
-The executable is unsigned, so Windows SmartScreen may show a prompt. The [release page](https://github.com/Kylekk29/ImageSorter/releases/latest) includes its SHA-256 checksum.
+- **Setup.exe** installs for your Windows user account and adds a Start menu shortcut.
+- **Portable.exe** opens directly without installation.
+
+The downloads are unsigned, so Windows SmartScreen may show a prompt. The [release page](https://github.com/Kylekk29/ImageSorter/releases/latest) includes its SHA-256 checksum.
 
 ## Review photos
 
-1. Drop a folder or select photos from one folder and drop them onto the preview. You can also open a folder with `Ctrl+O`.
+1. Drop a folder or select photos from one folder and drop them onto the preview. You can also select **Open folder** or press `Ctrl+O`.
 2. Press `K` to keep, `N` to discard, or `M` to mark a photo as maybe. After saving, the app advances to the next unreviewed photo.
 3. Use `[` and `]` or click a thumbnail to browse. Press `Ctrl+Z` to undo the last decision in the current session and remove its output copies.
 
@@ -55,6 +58,14 @@ Build the portable executable into `dist/` with PowerShell.
 ```powershell
 .\build.ps1
 ```
+
+To also build the per-user installer, pass the path to the Inno Setup 6.3 or later compiler. The installer adds a Start menu shortcut and appears in **Settings → Apps → Installed apps**.
+
+```powershell
+.\build.ps1 -InnoCompiler "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+```
+
+The build produces `TurboPhotoSorter-<version>-x64-Setup.exe` alongside the portable executable in `dist/`.
 
 Run the regression tests with `python -m unittest discover -s tests -v`.
 

@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
 from tkinter import (
-    Canvas, Frame, Label, Button, Text, TclError,
+    Canvas, Frame, Label, Button, Text, TclError, DoubleVar,
     filedialog, messagebox, ttk, Scale, HORIZONTAL, Toplevel
 )
 import exifread
@@ -16,30 +16,30 @@ from tkinterdnd2 import COPY, DND_FILES, REFUSE_DROP, TkinterDnD
 from sorting import load_progress, save_decision, undo_decision
 
 # ───── Config ─────
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
+APP_ICON = Path(__file__).resolve().parent / "assets" / "app.ico"
 CONFIG_FILE = "turbo_sorter_config.json"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".webp", ".bmp"}
 ACTIONS = {"keep": "Keep", "discard": "Discard", "maybe": "Maybe"}
-THUMB_WIDTH = 120
+THUMB_WIDTH = 116
+FILMSTRIP_HEIGHT = 88
 FRAME_INTERVAL_MS = 16
 
 THEMES = {
     "dark": {
-        "bg": "#0d1117", "fg": "#e6edf3", "panel": "#161b22",
-        "keep": "#238636", "discard": "#da3633", "maybe": "#d29922",
-        "highlight": "#1f6feb", "text_dim": "#8b949e",
-        "exif_bg": "#0d1117", "exif_fg": "#8b949e", "btn_fg": "#ffffff",
-        "border": "#30363d", "hover": "#1c2128", "filmstrip_bg": "#0d1117",
-        "accent": "#58a6ff",
+        "bg": "#14171e", "panel": "#1e232d", "preview": "#0c0f15",
+        "fg": "#f1f3fa", "text_dim": "#aeb8ca", "disabled": "#8994a8",
+        "border": "#394252", "hover": "#2b3443", "filmstrip_bg": "#181d26",
+        "accent": "#a5b5ff", "primary": "#4359c4",
+        "keep": "#226449", "discard": "#963b4b", "maybe": "#795218",
     },
     "light": {
-        "bg": "#ffffff", "fg": "#1f2328", "panel": "#f6f8fa",
-        "keep": "#2da44e", "discard": "#cf222e", "maybe": "#bf8700",
-        "highlight": "#0969da", "text_dim": "#656d76",
-        "exif_bg": "#f6f8fa", "exif_fg": "#656d76", "btn_fg": "#ffffff",
-        "border": "#d0d7de", "hover": "#eaeef2", "filmstrip_bg": "#f6f8fa",
-        "accent": "#0969da",
-    }
+        "bg": "#eef1f6", "panel": "#ffffff", "preview": "#dce2eb",
+        "fg": "#212937", "text_dim": "#526077", "disabled": "#566479",
+        "border": "#c6cfde", "hover": "#e4eaf4", "filmstrip_bg": "#f6f8fc",
+        "accent": "#384fa8", "primary": "#4055b8",
+        "keep": "#21634a", "discard": "#98394b", "maybe": "#795218",
+    },
 }
 
 
@@ -63,17 +63,18 @@ class ImageLoader:
                     for tag in interesting:
                         if tag in tags:
                             clean_tag = tag.replace("Image ", "").replace("EXIF ", "")
-                            exif_text += f"{clean_tag:<18}: {tags[tag]}\n"
-                else:
-                    exif_text = "No EXIF Data"
+                            exif_text += f"{clean_tag}: {tags[tag]}\n"
+                if not exif_text:
+                    exif_text = "No camera metadata available."
             except:
                 exif_text = "EXIF Error"
 
             with Image.open(path) as source:
+                width, height = source.size
+                if source.getexif().get(ExifTags.Base.Orientation, 1) in (5, 6, 7, 8):
+                    width, height = height, width
+                metadata = f"{source.format} · {width:,} × {height:,} px\n{exif_text}"
                 if source.format == "JPEG":
-                    width, height = source.size
-                    if source.getexif().get(ExifTags.Base.Orientation, 1) in (5, 6, 7, 8):
-                        width, height = height, width
                     scale = min(target_width / width, target_height / height, 1)
                     # Use the fitted size in the JPEG's stored orientation.
                     source.draft("RGB", (max(1, int(source.width * scale)),
@@ -82,7 +83,7 @@ class ImageLoader:
                 if image.mode != "RGB":
                     image = image.convert("RGB")
             image.thumbnail((target_width, target_height), Image.Resampling.LANCZOS)
-            return image, exif_text
+            return image, metadata
 
         except Exception as e:
             print(f"Loader Error: {e}")
@@ -106,8 +107,10 @@ class TurboSorter:
     def __init__(self, root):
         self.root = root
         self.root.title(f"Turbo Photo Sorter {APP_VERSION}")
-        self.root.geometry("1600x1000")
-        self.root.minsize(1200, 700)
+        self.root.iconbitmap(default=str(APP_ICON))
+        screen_width, screen_height = root.winfo_screenwidth(), root.winfo_screenheight()
+        self.root.geometry(f"{min(1380, screen_width - 48)}x{min(880, screen_height - 100)}")
+        self.root.minsize(900, 640)
 
         # State
         self.source_dir = None
@@ -127,7 +130,7 @@ class TurboSorter:
         self.thumb_slots = {}
         self.save_job = None
         self.canvas_dim = (1200, 900)
-        self.preview_dim = (root.winfo_screenwidth(), root.winfo_screenheight())
+        self.preview_dim = (screen_width, screen_height)
 
         # Display State
         self.base_image = None
@@ -164,226 +167,194 @@ class TurboSorter:
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
     def build_ui(self):
-        self.root.configure(bg=self.colors["bg"])
-        
-        # Main layout: 3 rows (canvas, filmstrip, status)
-        self.root.grid_rowconfigure(0, weight=1)  # Canvas area
-        self.root.grid_rowconfigure(1, weight=0)  # Filmstrip
-        self.root.grid_rowconfigure(2, weight=0)  # Status bar
+        colors = self.colors
+        self.root.configure(bg=colors["bg"])
+        self.root.grid_rowconfigure(1, weight=1)
         self.root.grid_columnconfigure(0, weight=1)
-        self.root.grid_columnconfigure(1, minsize=320, weight=0)
+        self.root.grid_columnconfigure(1, minsize=292)
 
-        # --- 1. Main Canvas (Left) ---
-        canvas_frame = Frame(self.root, bg=self.colors["bg"], 
-                             highlightbackground=self.colors["border"], highlightthickness=1)
-        canvas_frame.grid(row=0, column=0, sticky="nsew", padx=(5, 2), pady=(5, 2))
-        canvas_frame.grid_rowconfigure(0, weight=1)
-        canvas_frame.grid_columnconfigure(0, weight=1)
+        style = ttk.Style(self.root)
+        style.theme_use("clam")
+        style.configure("Filmstrip.Horizontal.TScrollbar", arrowsize=12,
+                        background=colors["hover"], troughcolor=colors["filmstrip_bg"],
+                        bordercolor=colors["filmstrip_bg"], arrowcolor=colors["text_dim"],
+                        lightcolor=colors["hover"], darkcolor=colors["hover"])
+        style.map("Filmstrip.Horizontal.TScrollbar",
+                  background=[("active", colors["border"])])
 
-        self.canvas = Canvas(canvas_frame, bg=self.colors["bg"], highlightthickness=0, cursor="crosshair")
-        self.canvas.grid(row=0, column=0, sticky="nsew")
+        header = Frame(self.root, bg=colors["bg"])
+        header.grid(row=0, column=0, columnspan=2, sticky="ew", padx=16, pady=12)
+        Label(header, text="Turbo Photo Sorter", bg=colors["bg"], fg=colors["fg"],
+              font=("Segoe UI", 18, "bold")).pack(side="left")
+        self.make_button(header, "Light mode" if self.dark_mode else "Dark mode",
+                         self.toggle_theme).pack(side="right")
+        self.btn_open = self.make_button(header, "Open folder   Ctrl+O", self.load_source,
+                                         color=colors["primary"])
+        self.btn_open.pack(side="right", padx=(0, 8))
+
+        workspace = Frame(self.root, bg=colors["panel"],
+                          highlightbackground=colors["border"], highlightthickness=1)
+        workspace.grid(row=1, column=0, sticky="nsew", padx=(16, 10))
+        workspace.grid_rowconfigure(1, weight=1)
+        workspace.grid_columnconfigure(0, weight=1)
+
+        toolbar = Frame(workspace, bg=colors["panel"])
+        toolbar.grid(row=0, column=0, sticky="ew", padx=10, pady=6)
+        toolbar.grid_columnconfigure(1, weight=1)
+        self.photo_position = Label(toolbar, bg=colors["panel"], fg=colors["accent"],
+                                    font=("Segoe UI", 9, "bold"), padx=4)
+        self.photo_position.grid(row=0, column=0, sticky="w")
+        self.filename_label = Label(toolbar, width=1, bg=colors["panel"], fg=colors["fg"],
+                                    font=("Segoe UI", 10), anchor="w")
+        self.filename_label.grid(row=0, column=1, sticky="ew", padx=(6, 10))
+        self.btn_zoom_out = self.make_button(toolbar, "−", self.zoom_out)
+        self.btn_zoom_out.grid(row=0, column=2)
+        self.btn_zoom_reset = self.make_button(toolbar, "Fit", self.zoom_reset, width=5)
+        self.btn_zoom_reset.grid(row=0, column=3, padx=2)
+        self.btn_zoom_in = self.make_button(toolbar, "+", self.zoom_in)
+        self.btn_zoom_in.grid(row=0, column=4)
+        self.btn_fullscreen = self.make_button(toolbar, "Fullscreen   F11", self.toggle_fullscreen)
+        self.btn_fullscreen.grid(row=0, column=5, padx=(8, 0))
+
+        self.canvas = Canvas(workspace, bg=colors["preview"], highlightthickness=0)
+        self.canvas.grid(row=1, column=0, sticky="nsew")
         self.canvas.bind("<Configure>", self.on_resize)
 
-        self.placeholder = Label(self.canvas, text="📁  Drop photos or a folder here\n\nClick here or press Ctrl+O",
-                                 font=("Segoe UI", 20), bg=self.colors["bg"], fg=self.colors["text_dim"],
-                                 justify="center")
-        self.placeholder.place(relx=0.5, rely=0.5, anchor="center")
+        self.placeholder = Frame(self.canvas, bg=colors["preview"])
+        self.placeholder_title = Label(self.placeholder, bg=colors["preview"], fg=colors["fg"],
+                                       font=("Segoe UI", 24, "bold"))
+        self.placeholder_title.pack()
+        self.placeholder_detail = Label(self.placeholder, bg=colors["preview"], fg=colors["text_dim"],
+                                        font=("Segoe UI", 11))
+        self.placeholder_detail.pack(pady=(4, 14))
+        self.btn_empty_open = self.make_button(self.placeholder, "Open folder", self.load_source,
+                                               color=colors["primary"])
+        self.btn_empty_open.pack()
+        self.loading_label = Label(self.canvas, bg=colors["preview"], fg=colors["text_dim"],
+                                   font=("Segoe UI", 14), padx=12, pady=6)
 
-        self.placeholder.bind("<Button-1>", lambda event: self.load_source())
+        sidebar = Frame(self.root, bg=colors["panel"], highlightthickness=1,
+                        highlightbackground=colors["border"], padx=14, pady=12)
+        sidebar.grid(row=1, column=1, sticky="nsew", padx=(0, 16))
+        sidebar.grid_columnconfigure(0, weight=1)
+        sidebar.grid_rowconfigure(2, weight=1)
 
-        self.loading_label = Label(self.canvas, text="⏳ LOADING...", 
-                                   font=("Segoe UI", 36, "bold"), bg=self.colors["bg"], fg=self.colors["highlight"])
-        self.loading_label.place_forget()
+        review = Frame(sidebar, bg=colors["panel"])
+        review.grid(row=0, column=0, sticky="ew")
+        review.grid_columnconfigure(1, weight=1)
+        self.section_title(review, "Review").grid(row=0, column=0, sticky="w")
+        self.progress_text = Label(review, bg=colors["panel"], fg=colors["text_dim"],
+                                   font=("Segoe UI", 9))
+        self.progress_text.grid(row=0, column=1, sticky="e")
+        self.progress_bar = Canvas(review, height=6, width=1, bg=colors["hover"],
+                                   highlightthickness=0, borderwidth=0)
+        self.progress_bar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 10))
+        self.progress_fill = self.progress_bar.create_rectangle(0, 0, 0, 0,
+                                                                fill=colors["accent"], width=0)
+        self.progress_bar.bind("<Configure>", self.draw_progress)
 
-        # --- 2. Sidebar (Right) ---
-        self.sidebar = Frame(self.root, bg=self.colors["panel"], 
-                             highlightbackground=self.colors["border"], highlightthickness=1)
-        self.sidebar.grid(row=0, column=1, sticky="nsew", padx=(2, 5), pady=(5, 2))
-        self.sidebar.pack_propagate(False)
+        self.decision_buttons = {}
+        for row, (action, shortcut) in enumerate(
+            (("keep", "K / → / Space"), ("discard", "N / ↓"), ("maybe", "M")), start=2
+        ):
+            button = self.make_button(review, f"{ACTIONS[action]}   |   {shortcut}",
+                                      lambda choice=action: self.sort(choice),
+                                      color=colors[action], anchor="w")
+            button.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+            self.decision_buttons[action] = button
 
-        # Padding container
-        pad = Frame(self.sidebar, bg=self.colors["panel"])
-        pad.pack(fill="both", expand=True, padx=15, pady=15)
+        navigation = Frame(review, bg=colors["panel"])
+        navigation.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(3, 0))
+        navigation.grid_columnconfigure((0, 1, 2), weight=1)
+        self.btn_previous = self.make_button(navigation, "Previous  [", lambda: self.browse(-1))
+        self.btn_previous.grid(row=0, column=0, sticky="ew")
+        self.btn_next = self.make_button(navigation, "Next  ]", lambda: self.browse(1))
+        self.btn_next.grid(row=0, column=1, sticky="ew", padx=4)
+        self.btn_undo = self.make_button(navigation, "Undo  Ctrl+Z", self.undo)
+        self.btn_undo.grid(row=0, column=2, sticky="ew")
 
-        # --- Header with Theme Toggle ---
-        header_frame = Frame(pad, bg=self.colors["panel"])
-        header_frame.pack(fill="x", pady=(0, 10))
+        adjustments = Frame(sidebar, bg=colors["panel"])
+        adjustments.grid(row=1, column=0, sticky="ew", pady=(14, 10))
+        adjustments.grid_columnconfigure(1, weight=1)
+        self.section_title(adjustments, "Adjustments").grid(row=0, column=0, sticky="w")
+        self.btn_reset = self.make_button(adjustments, "Reset", self.reset_adjustments)
+        self.btn_reset.grid(row=0, column=1, sticky="e")
+        scales = []
+        self.adjustment_vars = []
+        for row, (label, command, value) in enumerate((
+            ("Brightness", self.on_brightness_change, self.brightness_val),
+            ("Contrast", self.on_contrast_change, self.contrast_val),
+        ), start=1):
+            Label(adjustments, text=label, bg=colors["panel"], fg=colors["text_dim"],
+                  font=("Segoe UI", 9)).grid(row=row, column=0, sticky="w", padx=(0, 8))
+            variable = DoubleVar(self.root, value=value)
+            self.adjustment_vars.append(variable)
+            scale = Scale(adjustments, from_=0.5, to=3.0, resolution=0.1, digits=2,
+                          orient=HORIZONTAL, command=command, length=110, variable=variable,
+                          bg=colors["panel"], fg=colors["fg"], font=("Segoe UI", 8),
+                          troughcolor=colors["hover"], activebackground=colors["accent"],
+                          sliderrelief="raised", sliderlength=15, highlightthickness=1,
+                          highlightbackground=colors["panel"], highlightcolor=colors["accent"],
+                          borderwidth=1)
+            scale.grid(row=row, column=1, sticky="ew")
+            scales.append(scale)
+        self.scale_bright, self.scale_contrast = scales
 
-        self.theme_btn = Button(header_frame, text="🌙" if self.dark_mode else "☀️", 
-                                command=self.toggle_theme,
-                                bg=self.colors["panel"], fg=self.colors["fg"], 
-                                relief="flat", font=("Segoe UI", 14), cursor="hand2",
-                                activebackground=self.colors["hover"], activeforeground=self.colors["accent"])
-        self.theme_btn.pack(side="left")
-
-        # Progress Stats
-        self.progress_text = Label(header_frame, text="0 / 0", font=("Segoe UI", 18, "bold"),
-                                   bg=self.colors["panel"], fg=self.colors["fg"])
-        self.progress_text.pack(side="right")
-
-        # Progress Bar
-        style = ttk.Style()
-        style.theme_use("clam")
-        style.configure("TProgressbar", 
-                       background=self.colors["highlight"],
-                       troughcolor=self.colors["bg"],
-                       bordercolor=self.colors["border"],
-                       lightcolor=self.colors["highlight"],
-                       darkcolor=self.colors["highlight"])
-        self.progress_bar = ttk.Progressbar(pad, mode="determinate", style="TProgressbar")
-        self.progress_bar.pack(fill="x", pady=(0, 15))
-
-        # Status / Action Label
-        self.lbl_action = Label(pad, text="Ready", font=("Segoe UI", 13, "bold"),
-                                bg=self.colors["panel"], fg=self.colors["text_dim"], anchor="center")
-        self.lbl_action.pack(fill="x", pady=(0, 15))
-
-        # --- Image Adjustments Frame ---
-        adj_frame = Frame(pad, bg=self.colors["panel"], 
-                          highlightbackground=self.colors["border"], highlightthickness=1, padx=10, pady=10)
-        adj_frame.pack(fill="x", pady=(0, 15))
-
-        Label(adj_frame, text="🎨 Adjustments", font=("Segoe UI", 10, "bold"),
-              bg=self.colors["panel"], fg=self.colors["fg"]).pack(anchor="w", pady=(0, 8))
-        
-        # Brightness
-        bright_frame = Frame(adj_frame, bg=self.colors["panel"])
-        bright_frame.pack(fill="x", pady=(0, 8))
-        Label(bright_frame, text="☀ Brightness", 
-              bg=self.colors["panel"], fg=self.colors["text_dim"], font=("Segoe UI", 9)).pack(anchor="w")
-        self.scale_bright = Scale(bright_frame, from_=0.5, to=3.0, resolution=0.1, 
-                                  orient=HORIZONTAL, command=self.on_brightness_change,
-                                  bg=self.colors["panel"], fg=self.colors["fg"], 
-                                  highlightthickness=0, troughcolor=self.colors["bg"], 
-                                  activebackground=self.colors["highlight"],
-                                  length=250, sliderrelief="flat")
-        self.scale_bright.set(self.brightness_val)
-        self.scale_bright.pack(fill="x")
-
-        # Contrast
-        contrast_frame = Frame(adj_frame, bg=self.colors["panel"])
-        contrast_frame.pack(fill="x", pady=(0, 8))
-        Label(contrast_frame, text="🌓 Contrast", 
-              bg=self.colors["panel"], fg=self.colors["text_dim"], font=("Segoe UI", 9)).pack(anchor="w")
-        self.scale_contrast = Scale(contrast_frame, from_=0.5, to=3.0, resolution=0.1, 
-                                    orient=HORIZONTAL, command=self.on_contrast_change,
-                                    bg=self.colors["panel"], fg=self.colors["fg"], 
-                                    highlightthickness=0, troughcolor=self.colors["bg"], 
-                                    activebackground=self.colors["highlight"],
-                                    length=250, sliderrelief="flat")
-        self.scale_contrast.set(self.contrast_val)
-        self.scale_contrast.pack(fill="x")
-        
-        btn_reset = Button(adj_frame, text="↺ Reset Adjustments", command=self.reset_adjustments,
-                           bg=self.colors["bg"], fg=self.colors["fg"], relief="flat", 
-                           font=("Segoe UI", 9), cursor="hand2",
-                           activebackground=self.colors["hover"], activeforeground=self.colors["accent"])
-        btn_reset.pack(fill="x", pady=(5, 0))
-
-        # --- Action Buttons ---
-        btn_frame = Frame(pad, bg=self.colors["panel"])
-        btn_frame.pack(fill="x", pady=(0, 15))
-
-        self.btn_keep = self.mk_btn(btn_frame, "✓  KEEP", self.colors["keep"], 
-                                    lambda: self.sort("keep"), "→ / K / Space")
-        self.btn_discard = self.mk_btn(btn_frame, "✗  DISCARD", self.colors["discard"], 
-                                       lambda: self.sort("discard"), "↓ / N")
-        self.btn_maybe = self.mk_btn(btn_frame, "?  MAYBE", self.colors["maybe"], 
-                                     lambda: self.sort("maybe"), "M")
-        self.btn_undo = self.mk_btn(btn_frame, "↩  UNDO", "#555", self.undo, "Ctrl+Z")
-
-        navigation = Frame(btn_frame, bg=self.colors["panel"])
-        navigation.pack(fill="x", pady=(4, 0))
-        for label, offset in (("Previous  [", -1), ("Next  ]", 1)):
-            Button(navigation, text=label, command=lambda step=offset: self.browse(step),
-                   bg=self.colors["bg"], fg=self.colors["fg"], relief="flat",
-                   cursor="hand2").pack(side="left", fill="x", expand=True, padx=2)
-
-        # --- Zoom Controls ---
-        zoom_frame = Frame(pad, bg=self.colors["panel"])
-        zoom_frame.pack(fill="x", pady=(0, 15))
-        
-        Label(zoom_frame, text="🔍 Zoom", font=("Segoe UI", 10, "bold"),
-              bg=self.colors["panel"], fg=self.colors["fg"]).pack(anchor="w", pady=(0, 5))
-        
-        zoom_btn_frame = Frame(zoom_frame, bg=self.colors["panel"])
-        zoom_btn_frame.pack(fill="x")
-        
-        self.btn_zoom_in = Button(zoom_btn_frame, text="➕  Zoom In", command=self.zoom_in,
-                                  bg=self.colors["bg"], fg=self.colors["fg"], relief="flat",
-                                  font=("Segoe UI", 9), cursor="hand2",
-                                  activebackground=self.colors["hover"], activeforeground=self.colors["accent"])
-        self.btn_zoom_in.pack(side="left", fill="x", expand=True, padx=(0, 3))
-        
-        self.btn_zoom_out = Button(zoom_btn_frame, text="➖  Zoom Out", command=self.zoom_out,
-                                   bg=self.colors["bg"], fg=self.colors["fg"], relief="flat",
-                                   font=("Segoe UI", 9), cursor="hand2",
-                                   activebackground=self.colors["hover"], activeforeground=self.colors["accent"])
-        self.btn_zoom_out.pack(side="left", fill="x", expand=True, padx=(3, 3))
-        
-        self.btn_zoom_reset = Button(zoom_btn_frame, text="↺  Reset", command=self.zoom_reset,
-                                     bg=self.colors["bg"], fg=self.colors["fg"], relief="flat",
-                                     font=("Segoe UI", 9), cursor="hand2",
-                                     activebackground=self.colors["hover"], activeforeground=self.colors["accent"])
-        self.btn_zoom_reset.pack(side="left", fill="x", expand=True, padx=(3, 0))
-
-        # --- Fullscreen Button ---
-        self.btn_fullscreen = Button(pad, text="⛶  Fullscreen (F11)", command=self.toggle_fullscreen,
-                                     bg=self.colors["bg"], fg=self.colors["fg"], relief="flat",
-                                     font=("Segoe UI", 9), cursor="hand2",
-                                     activebackground=self.colors["hover"], activeforeground=self.colors["accent"])
-        self.btn_fullscreen.pack(fill="x", pady=(0, 15))
-
-        # --- EXIF / Metadata ---
-        lbl_info = Label(pad, text="📋 Metadata", font=("Segoe UI", 10, "bold"),
-                         bg=self.colors["panel"], fg=self.colors["fg"], anchor="w")
-        lbl_info.pack(fill="x", pady=(0, 5))
-        
-        self.exif_box = Text(pad, height=10, font=("Consolas", 9),
-                             bg=self.colors["exif_bg"], fg=self.colors["exif_fg"],
-                             relief="flat", highlightthickness=1, 
-                             highlightbackground=self.colors["border"],
-                             padx=8, pady=8)
+        details = Frame(sidebar, bg=colors["panel"])
+        details.grid(row=2, column=0, sticky="nsew")
+        self.section_title(details, "Photo details").pack(anchor="w", pady=(0, 5))
+        self.exif_box = Text(details, height=1, width=1, font=("Segoe UI", 9),
+                             bg=colors["bg"], fg=colors["text_dim"], relief="flat",
+                             borderwidth=0, highlightthickness=0, padx=8, pady=5, wrap="word")
         self.exif_box.pack(fill="both", expand=True)
+        self.set_photo_details("Select a photo to see its details.")
 
-        # --- 3. Filmstrip (Bottom) ---
-        self.filmstrip_frame = Frame(self.root, bg=self.colors["filmstrip_bg"], 
-                                     highlightbackground=self.colors["border"], highlightthickness=1,
-                                     height=108)
-        self.filmstrip_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=5, pady=(0, 2))
-        self.filmstrip_frame.grid_propagate(False)
-
-        # Filmstrip canvas for scrolling
-        self.filmstrip_canvas = Canvas(self.filmstrip_frame, bg=self.colors["filmstrip_bg"], 
-                                       highlightthickness=0, height=90)
+        filmstrip = Frame(self.root, bg=colors["filmstrip_bg"],
+                          highlightbackground=colors["border"], highlightthickness=1)
+        filmstrip.grid(row=2, column=0, columnspan=2, sticky="ew", padx=16, pady=(10, 0))
+        self.filmstrip_canvas = Canvas(filmstrip, bg=colors["filmstrip_bg"],
+                                       highlightthickness=0, height=FILMSTRIP_HEIGHT)
         self.thumb_slots.clear()
-        scrollbar = ttk.Scrollbar(self.filmstrip_frame, orient="horizontal",
+        scrollbar = ttk.Scrollbar(filmstrip, orient="horizontal",
+                                  style="Filmstrip.Horizontal.TScrollbar",
                                   command=self.scroll_filmstrip)
         scrollbar.pack(side="bottom", fill="x")
-        self.filmstrip_canvas.pack(fill="both", expand=True)
+        self.filmstrip_canvas.pack(fill="x")
         self.filmstrip_canvas.configure(xscrollcommand=scrollbar.set)
         self.filmstrip_canvas.bind("<Configure>", self.draw_filmstrip)
         self.filmstrip_canvas.bind("<Button-1>", self.select_thumbnail)
+        self.filmstrip_canvas.configure(xscrollincrement=THUMB_WIDTH)
+        self.filmstrip_canvas.bind("<MouseWheel>", self.on_filmstrip_mousewheel)
 
-        # --- 4. Status Bar ---
-        self.status_bar = Frame(self.root, bg=self.colors["panel"], height=24,
-                                highlightbackground=self.colors["border"], highlightthickness=1)
-        self.status_bar.grid(row=2, column=0, columnspan=2, sticky="ew", padx=5, pady=(0, 5))
-        self.status_bar.grid_propagate(False)
-
-        self.status_label = Label(self.status_bar, text="Ready — Drop photos or open a folder with Ctrl+O",
-                                  bg=self.colors["panel"], fg=self.colors["text_dim"],
-                                  font=("Segoe UI", 9), anchor="w", padx=10)
+        footer = Frame(self.root, bg=colors["bg"])
+        footer.grid(row=3, column=0, columnspan=2, sticky="ew", padx=16, pady=6)
+        self.status_label = Label(footer, text="Drop photos here or open a folder",
+                                  bg=colors["bg"], fg=colors["text_dim"],
+                                  font=("Segoe UI", 9), anchor="w", width=1)
         self.status_label.pack(side="left", fill="x", expand=True)
 
-        self.filename_label = Label(self.status_bar, text="", bg=self.colors["panel"], 
-                                    fg=self.colors["text_dim"], font=("Segoe UI", 9), anchor="e", padx=10)
-        self.filename_label.pack(side="right")
-
-        # Setup interactions
         self.setup_interactions()
-        self.bind_drop_target(self.canvas)
-        self.bind_drop_target(self.placeholder)
+        for widget in (self.canvas, self.placeholder, *self.placeholder.winfo_children()):
+            self.bind_drop_target(widget)
+        self.update_ui_text()
+        self.update_controls()
+        if self.source_dir is None:
+            self.show_finished()
+
+    def section_title(self, parent, text):
+        return Label(parent, text=text, font=("Segoe UI", 11, "bold"),
+                     bg=self.colors["panel"], fg=self.colors["fg"])
+
+    def make_button(self, parent, text, command, *, color=None, **options):
+        colors = self.colors
+        foreground = "#ffffff" if color else colors["fg"]
+        return Button(parent, text=text, command=command, bg=color or colors["hover"],
+                      fg=foreground, activeforeground=foreground,
+                      activebackground=self._lighten_color(color, 0.12) if color else colors["border"],
+                      disabledforeground=colors["disabled"], relief="flat", borderwidth=0,
+                      highlightthickness=1, highlightbackground=parent.cget("bg"),
+                      highlightcolor=colors["accent"], cursor="hand2", font=("Segoe UI", 9, "bold"),
+                      padx=10, pady=4, **options)
 
     def setup_interactions(self):
         """Setup mouse interactions for the canvas."""
@@ -406,7 +377,7 @@ class TurboSorter:
             return
         if event.delta > 0:
             self.zoom_in()
-        else:
+        elif event.delta < 0:
             self.zoom_out()
 
     def on_pan_start(self, event):
@@ -434,21 +405,19 @@ class TurboSorter:
         if self.is_dragging:
             self.is_dragging = False
             self.refresh_image_visuals()
-        self.canvas.config(cursor="crosshair")
+        self.canvas.config(cursor="crosshair" if self.base_image is not None else "")
 
     def zoom_in(self):
-        if self.zoom_level < 5.0:
+        if self.base_image is not None and self.zoom_level < 5.0:
             self.zoom_level = min(5.0, self.zoom_level * 1.25)
-            if self.base_image:
-                self.refresh_image_visuals()
-            self.update_status("Zoom: {:.0f}%".format(self.zoom_level * 100))
+            self.refresh_image_visuals()
+            self.update_zoom_display()
 
     def zoom_out(self):
-        if self.zoom_level > 0.2:
+        if self.base_image is not None and self.zoom_level > 0.2:
             self.zoom_level = max(0.2, self.zoom_level / 1.25)
-            if self.base_image:
-                self.refresh_image_visuals()
-            self.update_status("Zoom: {:.0f}%".format(self.zoom_level * 100))
+            self.refresh_image_visuals()
+            self.update_zoom_display()
 
     def zoom_reset(self):
         self.zoom_level = 1.0
@@ -456,24 +425,7 @@ class TurboSorter:
         self.pan_y = 0
         if self.base_image:
             self.refresh_image_visuals()
-        self.update_status("Zoom reset")
-
-    def mk_btn(self, parent, text, color, cmd, shortcut=""):
-        """Create a styled button with shortcut hint."""
-        frame = Frame(parent, bg=self.colors["panel"])
-        frame.pack(fill="x", pady=3)
-        
-        b = Button(frame, text=text, command=cmd, bg=color, fg="#fff",
-                   font=("Segoe UI", 11, "bold"), relief="flat", pady=10, cursor="hand2",
-                   activebackground=self._lighten_color(color, 0.2))
-        b.pack(fill="x", side="left", expand=True)
-        
-        if shortcut:
-            hint = Label(frame, text=shortcut, bg=color, fg=self.colors["btn_fg"],
-                         font=("Segoe UI", 8), padx=8)
-            hint.pack(side="right")
-        
-        return b
+        self.update_zoom_display()
 
     def _lighten_color(self, hex_color, factor=0.2):
         """Lighten a hex color by a factor."""
@@ -490,8 +442,6 @@ class TurboSorter:
         self.canvas_dim = (event.width, event.height)
         if self.base_image is not None:
             self.refresh_image_visuals()
-        elif self.source_dir is not None and self.current_index >= len(self.image_list):
-            self.show_finished()
 
     # ───── ADJUSTMENT LOGIC ─────
     def on_brightness_change(self, val):
@@ -505,8 +455,8 @@ class TurboSorter:
             self.refresh_image_visuals()
 
     def reset_adjustments(self):
-        self.scale_bright.set(1.0)
-        self.scale_contrast.set(1.0)
+        for variable in self.adjustment_vars:
+            variable.set(1.0)
         self.brightness_val = 1.0
         self.contrast_val = 1.0
         if self.base_image:
@@ -576,7 +526,7 @@ class TurboSorter:
             return
         
         self.is_fullscreen = True
-        self.btn_fullscreen.config(text="⛶  Exit Fullscreen (Esc)")
+        self.btn_fullscreen.config(text="Exit fullscreen   Esc")
         
         # Create fullscreen window
         self.fullscreen_window = Toplevel(self.root)
@@ -621,7 +571,6 @@ class TurboSorter:
             return
         
         fw = self.fs_canvas.winfo_width()
-        fh = self.fs_canvas.winfo_height()
         
         hints = [
             "→ / K: Keep    ↓ / N: Discard    M: Maybe    Ctrl+Z: Undo    Esc: Exit",
@@ -649,7 +598,7 @@ class TurboSorter:
     def exit_fullscreen(self):
         """Exit fullscreen mode."""
         self.is_fullscreen = False
-        self.btn_fullscreen.config(text="⛶  Fullscreen (F11)")
+        self.btn_fullscreen.config(text="Fullscreen   F11")
         if self.fullscreen_window:
             try:
                 self.fullscreen_window.destroy()
@@ -658,6 +607,7 @@ class TurboSorter:
             self.fullscreen_window = None
             self.fs_canvas = None
             self.fs_photo = None
+        self.update_controls()
         self.refresh_image_visuals()
 
     # ───── LOADING ENGINE ─────
@@ -729,12 +679,10 @@ class TurboSorter:
         self.history.clear()
         self.cache.clear()
         self.thumb_cache.clear()
-        self.lbl_action.config(text="Ready", fg=self.colors["text_dim"])
         self.filmstrip_canvas.delete("all")
         self.thumb_slots.clear()
-        self.filmstrip_canvas.configure(scrollregion=(0, 0, len(images) * THUMB_WIDTH, 80))
+        self.filmstrip_canvas.configure(scrollregion=(0, 0, len(images) * THUMB_WIDTH, FILMSTRIP_HEIGHT))
         self.filmstrip_canvas.xview_moveto(0)
-        self.placeholder.place_forget()
         self.show_index(0)
         if images:
             self.update_status(f"Loaded {len(images)} photos from {folder.name}")
@@ -746,6 +694,12 @@ class TurboSorter:
     def scroll_filmstrip(self, *args):
         self.filmstrip_canvas.xview(*args)
         self.draw_filmstrip()
+
+    def on_filmstrip_mousewheel(self, event):
+        if event.delta:
+            units = max(1, abs(event.delta) // 120)
+            self.scroll_filmstrip("scroll", -units if event.delta > 0 else units, "units")
+        return "break"
 
     def select_thumbnail(self, event):
         index = int(self.filmstrip_canvas.canvasx(event.x) // THUMB_WIDTH)
@@ -778,14 +732,16 @@ class TurboSorter:
             x = index * THUMB_WIDTH + THUMB_WIDTH // 2
             tag = f"thumb{index}"
             canvas.delete(tag)
-            border = self.colors["highlight" if selected else "border"]
-            canvas.create_rectangle(x - 55, 3, x + 55, 80, outline=border, tags=tag)
+            border = self.colors["accent" if selected else "border"]
+            canvas.create_rectangle(x - 53, 4, x + 53, FILMSTRIP_HEIGHT - 4,
+                                    fill=self.colors["hover"] if selected else self.colors["panel"],
+                                    outline=border, width=2 if selected else 1, tags=tag)
             photo = None
             if image is not None:
                 photo = ImageTk.PhotoImage(image)
-                canvas.create_image(x, 34, image=photo, tags=tag)
-            canvas.create_text(x, 72, text=f"{index + 1}" + ("  ✓" if reviewed else ""),
-                               fill=self.colors["keep" if reviewed else "text_dim"],
+                canvas.create_image(x, 36, image=photo, tags=tag)
+            canvas.create_text(x, 75, text=f"{index + 1}" + ("  ✓" if reviewed else ""),
+                               fill=self.colors["accent" if selected else "text_dim"],
                                font=("Segoe UI", 8), tags=tag)
             self.thumb_slots[index] = (image, (reviewed, selected), photo)
 
@@ -803,21 +759,20 @@ class TurboSorter:
         self.adjusted_preview = None
         self.photo_ref = None
         self.is_dragging = False
-        self.canvas.configure(cursor="crosshair")
+        self.canvas.configure(cursor="")
         self.zoom_level = 1.0
         self.pan_x = self.pan_y = 0
         self.reset_adjustments()
         self.canvas.delete("all")
         self.loading_label.place_forget()
-        self.exif_box.config(state="normal")
-        self.exif_box.delete("1.0", "end")
-        self.exif_box.config(state="disabled")
         self.update_ui_text()
+        self.update_controls()
 
         if index < len(self.image_list):
             filename = self.image_list[index]
-            self.filename_label.config(text=filename)
-            self.update_status(f"Photo {index + 1} of {len(self.image_list)}")
+            self.placeholder.place_forget()
+            self.update_status("Already reviewed" if filename in self.processed_files
+                               else "Ready to review")
             width = self.filmstrip_canvas.winfo_width()
             left = self.filmstrip_canvas.canvasx(0)
             if index * THUMB_WIDTH < left or (index + 1) * THUMB_WIDTH > left + width:
@@ -825,7 +780,7 @@ class TurboSorter:
                 self.filmstrip_canvas.xview_moveto(offset / (len(self.image_list) * THUMB_WIDTH))
             self.request_image(index)
         else:
-            self.filename_label.config(text="")
+            self.set_photo_details("Select a photo to see its details.")
             self.show_finished()
         self.draw_filmstrip()
         if self.is_fullscreen:
@@ -849,6 +804,7 @@ class TurboSorter:
         if index in self.cache:
             self.display_preview(index)
         else:
+            self.set_photo_details("Loading photo details…")
             self.loading_label.config(text="Loading preview…")
             self.loading_label.place(relx=0.5, rely=0.5, anchor="center")
 
@@ -881,11 +837,16 @@ class TurboSorter:
             self.loading_label.place(relx=0.5, rely=0.5, anchor="center")
         else:
             self.loading_label.place_forget()
+        self.canvas.configure(cursor="crosshair" if image is not None else "")
+        self.set_photo_details(metadata)
+        self.update_controls()
+        self.refresh_image_visuals()
+
+    def set_photo_details(self, text):
         self.exif_box.config(state="normal")
         self.exif_box.delete("1.0", "end")
-        self.exif_box.insert("end", self.image_list[index] + "\n" + metadata)
+        self.exif_box.insert("end", text)
         self.exif_box.config(state="disabled")
-        self.refresh_image_visuals()
 
     # ───── SORTING LOGIC ─────
     def sort(self, action):
@@ -905,6 +866,7 @@ class TurboSorter:
         future = self.save_pool.submit(save_decision, self.source_dir, filename, ACTIONS[action],
                                        self.processed_files.copy(), adjusted)
         self.save_job = (future, self.current_index, action)
+        self.update_controls()
         self.update_status(f"Saving {filename}…")
 
     @staticmethod
@@ -927,6 +889,7 @@ class TurboSorter:
         try:
             outputs = future.result()
         except Exception as error:
+            self.update_controls()
             self.show_error("Could not save decision", error)
             return
 
@@ -941,10 +904,6 @@ class TurboSorter:
                     next_index = candidate
                     break
         self.show_index(next_index)
-        color = self.colors[action]
-        self.lbl_action.config(text=action.upper(), fg=color)
-        if self.remaining:
-            self.flash_overlay(action.upper(), color)
         self.update_status(f"{ACTIONS[action]} → {filename}" if self.remaining
                            else f"All {len(self.image_list)} photos reviewed")
 
@@ -963,7 +922,6 @@ class TurboSorter:
         self.processed_files.remove(filename)
         self.remaining += 1
         self.show_index(index)
-        self.lbl_action.config(text="UNDO", fg=self.colors["highlight"])
         if cleanup:
             self.show_error("Undid decision, but could not remove temporary copies", cleanup)
         else:
@@ -982,29 +940,71 @@ class TurboSorter:
             pool.shutdown(wait=False, cancel_futures=True)
         self.root.destroy()
 
-    def flash_overlay(self, text, color):
-        w = self.canvas.winfo_width()
-        tag = self.canvas.create_text(w//2, 100, text=text, fill=color, 
-                                      font=("Segoe UI", 60, "bold"))
-        canvas = self.canvas
-        canvas.after(400, lambda: canvas.delete(tag) if canvas.winfo_exists() else None)
-
     def update_ui_text(self):
-        reviewed = len(self.image_list) - self.remaining
-        self.progress_text.config(text=f"{reviewed} / {len(self.image_list)}")
-        self.progress_bar.configure(maximum=max(1, len(self.image_list)), value=reviewed)
+        total = len(self.image_list)
+        self.progress_text.config(text=f"{total - self.remaining} / {total} reviewed")
+        self.draw_progress()
+        if self.current_index < total:
+            self.photo_position.config(text=f"{self.current_index + 1} / {total}")
+            self.filename_label.config(text=self.image_list[self.current_index])
+        else:
+            self.photo_position.config(text="")
+            self.filename_label.config(text="Preview")
+        self.update_zoom_display()
+
+    def draw_progress(self, event=None):
+        total = len(self.image_list)
+        fraction = (total - self.remaining) / total if total else 0
+        width = round(self.progress_bar.winfo_width() * fraction)
+        self.progress_bar.coords(self.progress_fill, 0, 0, width, self.progress_bar.winfo_height())
+
+    def update_zoom_display(self):
+        zoom = "Fit" if self.zoom_level == 1.0 else f"{self.zoom_level:.0%}"
+        self.btn_zoom_reset.config(text=zoom)
+
+    def update_controls(self):
+        saving = self.save_job is not None
+        index = self.current_index
+        has_photo = index < len(self.image_list)
+        has_preview = self.base_image is not None
+        can_review = (not saving and has_photo and index in self.cache
+                      and self.image_list[index] not in self.processed_files)
+        for action, button in self.decision_buttons.items():
+            button.configure(state="normal" if can_review else "disabled",
+                             bg=self.colors[action if can_review else "hover"])
+        controls = (
+            (self.btn_open, not saving),
+            (self.btn_empty_open, not saving),
+            (self.btn_undo, not saving and bool(self.history)),
+            (self.btn_previous, not saving and index > 0),
+            (self.btn_next, not saving and index + 1 < len(self.image_list)),
+            (self.btn_zoom_in, has_preview),
+            (self.btn_zoom_out, has_preview),
+            (self.btn_zoom_reset, has_preview),
+            (self.btn_fullscreen, has_preview or self.is_fullscreen),
+            (self.btn_reset, not saving and has_preview),
+            (self.scale_bright, not saving and has_preview),
+            (self.scale_contrast, not saving and has_preview),
+        )
+        for widget, enabled in controls:
+            widget.configure(state="normal" if enabled else "disabled")
 
     def update_status(self, message):
-        """Update the status bar message."""
         self.status_label.config(text=message)
 
     def show_finished(self):
-        self.canvas.delete("completion")
-        self.canvas.create_text(
-            self.canvas.winfo_width() // 2, self.canvas.winfo_height() // 2,
-            text="All photos reviewed" if self.image_list else "No unreviewed photos",
-            font=("Segoe UI", 28, "bold"), fill=self.colors["keep"], tags="completion"
-        )
+        if self.source_dir is None:
+            title = "Open a folder to start"
+            detail = "You can also drop a folder or photos here."
+        elif self.image_list:
+            title = "All photos reviewed"
+            detail = f"Reviewed {len(self.image_list)} photos in {self.source_dir.name}."
+        else:
+            title = "No unreviewed photos"
+            detail = "Drop more photos here or open another folder."
+        self.placeholder_title.config(text=title, wraplength=400)
+        self.placeholder_detail.config(text=detail, wraplength=360)
+        self.placeholder.place(relx=0.5, rely=0.5, anchor="center")
 
     def bind_keys(self, window=None):
         if window is None:
@@ -1051,17 +1051,13 @@ class TurboSorter:
         with open(CONFIG_FILE, "w") as f:
             json.dump({"dark": self.dark_mode}, f)
         status = self.status_label.cget("text")
-        action = self.lbl_action.cget("text")
         for widget in self.root.winfo_children():
             widget.destroy()
         self.build_ui()
-        self.update_ui_text()
-        self.lbl_action.config(text=action)
         if self.source_dir is not None:
             self.placeholder.place_forget()
-            self.filmstrip_canvas.configure(scrollregion=(0, 0, len(self.image_list) * THUMB_WIDTH, 80))
+            self.filmstrip_canvas.configure(scrollregion=(0, 0, len(self.image_list) * THUMB_WIDTH, FILMSTRIP_HEIGHT))
             if self.current_index < len(self.image_list):
-                self.filename_label.config(text=self.image_list[self.current_index])
                 self.filmstrip_canvas.xview_moveto(max(0, self.current_index - 2) / len(self.image_list))
                 self.request_image(self.current_index)
             else:

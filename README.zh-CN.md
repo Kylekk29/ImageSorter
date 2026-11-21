@@ -6,13 +6,16 @@ Turbo Photo Sorter 是一款开源的 Windows 照片筛选工具。使用键盘�
 
 ## 下载 Windows x64 版
 
-下载 [TurboPhotoSorter-1.1.0-x64-Portable.exe](https://github.com/Kylekk29/ImageSorter/releases/download/v1.1.0/TurboPhotoSorter-1.1.0-x64-Portable.exe)，双击即可运行，无需安装。
+从[最新发布页面](https://github.com/Kylekk29/ImageSorter/releases/latest)选择 Windows x64 版本。
 
-程序未签名，Windows SmartScreen 可能会显示提示。[发布页面](https://github.com/Kylekk29/ImageSorter/releases/latest)提供 SHA-256 校验值。
+- **Setup.exe** 为当前 Windows 用户安装程序，并添加开始菜单快捷方式。
+- **Portable.exe** 双击即可运行，无需安装。
+
+下载文件未签名，Windows SmartScreen 可能会显示提示。[发布页面](https://github.com/Kylekk29/ImageSorter/releases/latest)提供 SHA-256 校验值。
 
 ## 筛选照片
 
-1. 把一个文件夹或同一文件夹内选中的照片拖到预览区。也可以按 `Ctrl+O` 打开文件夹。
+1. 把一个文件夹或同一文件夹内选中的照片拖到预览区。也可以点击 **Open folder** 或按 `Ctrl+O` 打开文件夹。
 2. 按 `K` 保留、`N` 丢弃或 `M` 标为待定。保存成功后，程序会跳到下一张未分类的照片。
 3. 按 `[`、`]` 或点击缩略图浏览。按 `Ctrl+Z` 可撤销本次会话中的上一次分类，并移除该操作生成的副本。
 
@@ -55,6 +58,14 @@ python main.py
 ```powershell
 .\build.ps1
 ```
+
+如果还需要生成安装版，请传入 Inno Setup 6.3 或更新版本的命令行编译器路径。
+
+```powershell
+.\build.ps1 -InnoCompiler "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+```
+
+安装版和便携版都会生成在 `dist/` 中。
 
 运行 `python -m unittest discover -s tests -v` 可执行回归测试。
 
